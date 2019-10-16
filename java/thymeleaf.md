@@ -50,6 +50,87 @@ SpringBoot会自动为Thymeleaf注册一个视图解析器ThymeleafViewResolver�
 
 4. 数据传递方式和jsp类似都是使用Model对象传递，这里不再举例，可以复习之前的笔记巩固
 
+## # 特别注意
+
+### 比较运算
+
+在Thymeleaf中```<p th:test="...>..."><p th:test="...<..."><p th:test="...>=..."><p th:test="...<=...">会和标签的<>混淆，所以在Thymeleaf中：
+
+```log
+
+大于'>': gt;
+小于'<': lt;
+大于等于'>=': ge;
+小于等于'<=': le;
+
+```
+
+### 默认表达式
+
+```<p th:text="null?:'我是空值时显示的内容'">```意思就是当'?:'前的变量值为空就显示'?:'后的内容，不空就显示其本身。可以用三元表达式来实现，但是这个默认表达式更简洁
+
+### 内联写法 [[]] 与 [()] 的区别
+
+```<p>'[[${}]]'</p>```: 在标签中直接显示model中的数据，效果类似```<p th:text="${}"></p>，'[[]]'是直接显示内容，就是原样输出。而```<p>'[(${})]'</p>```是会解析其中的html
+
+### 局部变量th:with
+
+```html
+
+<div th:with="heroN = ${allHero[0]}">
+  <p th:text="${heroN.username}">username正确用法</p>
+  <p th:text="heroN.phone">phone正确用法</p>
+</div>
+
+<div>
+  <p th:text="${heroN.username}">username错误用法</p>
+</div>
+
+```
+
+### 判断语句
+
+if: ```<h1 th:if="${true}">true标签存在并显示，false则标签不存在</h1>```
+unless:```<h1 th:unless="${1 lt 2}">内容，与if相反</h1>```
+switch: 类似java中的switch用法
+
+```html
+
+<div th:switch="${hero.username}">
+  <p th:case="'ipso'">你好，ipso</p>
+  <p th:case="'test'">你好，test</p>
+  <p th:case="*">未匹配到，就是java的switch的default</p>
+</div>
+
+```
+
+### 迭代(就是循环输出集合内容)
+
+```html
+
+<div th:each="hero:${allHero}">
+  <p th:text="hero.username">default</p>
+  <p th:text="hero.id">default</p>
+  <p th:text="hero.phone">default</p>
+</div>
+
+<h3>方式2: 'th:each="hero,stat:${allHero}'只是这里改变了，照样还是赋值给hero,stat对象的作用有：当前遍历的下标、当前已经遍历了多少等都可以获取</h3>
+<div th:each="hero,stat:${allHero}">
+  <p th:text="hero.username">default</p>
+  <p th:text="hero.id">default</p>
+  <p th:text="hero.phone">default</p>
+  <p th:text="stat.index">当前遍历的下标，从0开始的</p>
+  <p th:text="stat.count">当前遍历到第几个，从1开始</p>
+  <p th:text="stat.size">数据总数</p>
+  <p th:text="stat.first">当前遍历的是否是第一个，是就为true,不是为false</p>
+  <p th:text="stat.last">当前遍历的是否是最后一个，是就为true,不是为false</p>
+  <p th:text="stat.even">当前遍历的是否是偶数行，是就为true,不是为false，也就是false为奇数行</p>
+  <p th:text="stat.odd">当前遍历的是否是奇数行，是就为true,不是为false，也就是false为偶数行</p>
+  <p th:text="stat.current">当前遍历出的对象信息，包含了当前遍历的所有信息</p>
+</div>
+
+```
+
 ## # 最后
 
 以上就是基本的Thymeleaf与SpringBoot的整合，更多用法可以自行查找文档，多练多用自然能记住
