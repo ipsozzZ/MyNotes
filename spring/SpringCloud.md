@@ -279,8 +279,65 @@ eureka:
 
 ```
 
-## # Ribbon负载均衡
+## # Ribbon客户端负载均衡
 
 springcloud请求处理过程：系统接收到一个请求 --> 负载均衡器 --> 微服务集群中算法计算到的微服务
 
-上面注册了服务这里就可以调用服务了
+**服务端负载均衡**：
+
+负载均衡器维护一份服务列表，根据负载均衡算法将请求转发到相应的微服务上，负载均衡算法有：轮训(默认)，随机，加权轮训，加权随机，地址哈希等，所以负载均衡可以为微服务集群分担请求，降低系统压力。
+
+**客户端负载均衡**：
+
+客户端负载均衡与服务端负载均衡的区别在于：客户端负载均衡要维护一份服务列表。两者的最大区别在于服务清单存储的位置。在客户端负载均衡中，每个客户端服务都有一份自己要访问的服务清单，这些清单都是从Eureka服务注册中心获取的，而在服务器负载均衡中，只要负载均衡器维护一份服务列表。Ribbon实现的就是客户端负载均衡，它不用在创建新的微服务，只需要在已有的服务中加入Ribbon即可(一个业务微服务就是一个客户端)，如：现有多个同一产品生产者服务，负载均衡就是负责合理分配每一次该产品生产请求到合理的产品生产微服务。
+
+我们在消费者服务中引入eureka客户端启动器，application.yml配置文件如下：
+
+```yml
+
+server:
+  port: 80
+
+eureka:
+  client:
+    register-with-eureka: false # false表示不将当前服务注册到eureka, 因为当前服务是返回给用户，其它服务并不需要调用，所以不用注册到eureka，相当于客户端
+    fetch-registry: true # 服务发现，因为要生成服务清单，所以需要发现注册到eureka中的服务
+    service-url: http://www.ipso.me:8084/eureka/,http://localhost:8083/eureka/
+
+```
+
+自定义配置类如下：
+
+```java
+
+package live.ipso.springcloud.config;
+
+import org.springframework.cloud.client.loadbalancer.LoadBalanced;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.web.client.RestTemplate;
+
+@Configuration // 标识这是一个配置类
+public class ConfigBean {
+
+   @LoadBalanced  // 实现负载均衡，并且调用地址可以变成服务名，之前是使用IP地址，一般来说IP会因部署改变，但是服务名一般不会变，所以使用服务名更好
+   @Bean
+   public RestTemplate getRestTemplate(){
+      return new RestTemplate();
+   }
+}
+
+```
+
+## # Feign客户端接口调用
+
+功能类似RestTemplate + Ribbon，区别在于，Feign是面向接口编程的风格，实现的功能是一样的，都是调用eureka注册的微服务。
+
+使用Feign可以很方便的、简单的实现HTTP客户端(也就是上例中的消费者，负责返回数据给用户的)。使用Feign只需要定义一个接口，然后在接口上添加注解即可。spring cloud对Feign进行了封装，Feign默认集成了Ribbon实现客户端负载均衡
+
+**Feign注意事项**：
+
+SpringCloud对Feign进行了增强兼容了SpringMVC的注解，我们使用SpringMVC的注解时需要注意：
+
+1. @Feign接口方法有基本类型参数时,在参数前必须加@PathVariable("xxx")或@RequestParam("xxx")
+2. @Feign接口方法返回值为复杂对象时，返回的对象必须有无参的构造方法。
