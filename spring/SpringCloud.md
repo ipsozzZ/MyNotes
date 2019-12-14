@@ -1,6 +1,6 @@
 # SpringCloud
 
-分布式微服务集群，主要使用demo演示
+分布式微服务集群，主要使用demo演示，dome项目springCloud
 
 ## # 基础框架及Eureka服务管理
 
@@ -341,3 +341,597 @@ SpringCloud对Feign进行了增强兼容了SpringMVC的注解，我们使用Spri
 
 1. @Feign接口方法有基本类型参数时,在参数前必须加@PathVariable("xxx")或@RequestParam("xxx")
 2. @Feign接口方法返回值为复杂对象时，返回的对象必须有无参的构造方法。
+
+## # Hystrix熔断器
+
+在分布式微服务中，服务之间调用的链路上，由于网络原因、资源繁忙或者自身问题，服务并不能100%可用，如果单个服务出现问题，调用这个服务就会出现线程堵塞，导致响应时间过长或不可用，此时如有大量的请求，容器的线程资源会被完全消耗完毕，会导致服务瘫痪，服务与服务之间的依赖性，导致故障会传播，会对整个微服务框架造成灾难性后果。这就是服务故障中的"雪崩"效应。为了解决这个问题，业界提出熔断器模型
+
+**解决"雪崩"效应的方法**：
+
+Hystrix熔断器：
+
+1. 服务的熔断
+2. 服务监控
+
+**注意**：
+
+我们既可以在生产者服务中做熔断器，也可以在消费者服务中做熔断器
+
+**在生产者中做熔断器示例**：
+
+生产者中主要的关于Hystrix熔断器的代码示例
+
+* pom.xml中添加依赖
+
+```xml
+
+<!-- pom.xml中添加Hystrix依赖 -->
+<!-- hystrix熔断器 -->
+<dependency>
+    <groupId>org.springframework.cloud</groupId>
+    <artifactId>spring-cloud-starter-netflix-hystrix</artifactId>
+</dependency>
+
+```
+
+* 在启动类中添加注解"@EnableHystrix"开启Hystrix 熔断服务
+* 控制器代码示例
+
+```java
+
+package live.ipso.springcloud.Controller;
+
+import com.netflix.hystrix.contrib.javanica.annotation.HystrixCommand;
+import live.ipso.springcloud.entities.Product;
+import live.ipso.springcloud.service.ProductService;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.web.bind.annotation.*;
+
+import java.util.List;
+
+@RestController  // 响应的都是json字符串
+public class ProductController {
+
+   @Autowired
+   ProductService productService;
+
+   /**
+    * 根据id获取一条数据
+    * @param id 查询的id
+    * @return Product json字符串
+    */
+   // 当前方法出现异常时转到熔断器方法"getFallBack()",两个方法返回值、参数要一致
+   @HystrixCommand(fallbackMethod = "getFallBack")
+   @RequestMapping(value = "/product/get/{id}", method = RequestMethod.GET)
+   public Product get(@PathVariable("id") Integer id){
+      Product product = productService.getOne(id);
+      // product为空则模拟一个异常
+      if (product == null){
+         throw new RuntimeException("ID= " + id + "无效");
+      }
+      return product;
+   }
+
+   /**
+    * get方法熔断器，当get方法异常时调用此方法
+    * @param id 查询的id
+    * @return Product json字符串
+    */
+   public Product getFallBack(@PathVariable("id") Integer id){
+      return new Product(id, "ID=" + id + "id无效", "无","无法找到对应数据库");
+   }
+
+}
+
+```
+
+**消费者中的熔断器示例**：
+
+* 在application.yml中
+
+```yml
+
+server:
+  port: 8082
+
+eureka:
+  client:
+    register-with-eureka: false # false表示不将当前服务注册到eureka, 因为当前服务是返回给用户，其它服务并不需要调用，所以不用注册到eureka，相当于客户端
+    fetch-registry: true # 服务发现，因为要生成服务清单，所以需要发现注册到eureka中的服务
+    service-url:
+      defaultZone: http://www.ipso.me:8084/eureka/,http://localhost:8083/eureka/
+
+feign:
+  hystrix:
+    enabled: true  # 开启服务熔断器
+
+```
+
+* service包中接收生产者服务的接口
+
+```java
+
+package live.ipso.springcloud.service;
+
+import live.ipso.springcloud.entities.Product;
+import org.springframework.cloud.openfeign.FeignClient;
+import org.springframework.stereotype.Service;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestMethod;
+
+import java.util.List;
+
+// value指定调用微服务的名称，不区分大小写
+// fallback 作用，指定熔断处理类，如果被调用的方法出现异常，就会调用熔断处理类中的方法进行处理
+@FeignClient(value = "microservice-product", fallback = ProductClientServiceFallBack.class)
+public interface ProductClientService {
+
+   /**
+    * 通过RestTemplate向生产者服务中添加产品
+    * @return bool
+    */
+   @RequestMapping(value = "/product/add") // 特别注意这里的value是调用的微服务中的RequestMapping
+   Boolean add(Product product);
+
+   /**
+    * 通过RestTemplate从生产者服务中获取产品
+    * @param id 产品id
+    * @return Product
+    */
+   @RequestMapping(value = "/product/get/{id}", method = RequestMethod.GET)
+   Product get(@PathVariable("id") Integer id);
+
+   /**
+    * 从生产者服务中获取产品列表
+    * @return List Product
+    */
+   @RequestMapping(value = "/product/list", method = RequestMethod.GET)
+   List<Product> list();
+}
+
+```
+
+* 在service包中添加熔断处理类
+
+```java
+
+package live.ipso.springcloud.service;
+
+import live.ipso.springcloud.entities.Product;
+import org.springframework.stereotype.Component;
+
+import java.util.List;
+
+/**
+ * 熔断处理器类
+ * 如果在调用ProductClientService中的方法出现异常时，就会调用熔断器类中对应的方法
+ * 这里以get方法为例，其它方法做返回null处理
+ */
+@Component  // 一定要添加，将当前类纳入容器中,否者直接报错
+public class ProductClientServiceFallBack implements ProductClientService {
+   @Override
+   public Boolean add(Product product) {
+      return null;
+   }
+
+   /**
+    * 原方法处理异常时，触发
+    * @param id 产品id
+    * @return Product
+    */
+   @Override
+   public Product get(Integer id) {
+      return new Product(id, "id= " + id + "无效，当前为熔断处理器的处理结果", "无", "无数据源");
+   }
+
+   @Override
+   public List<Product> list() {
+      return null;
+   }
+}
+
+```
+
+* 注意生产者中的熔断器与消费者中的熔断器的区别
+
+## # Hystrix Dashboard监控平台搭建
+
+**什么是服务监控**：
+
+* 除了隔离依赖服务的调用外，Hystrix还提供了准实时的调用监控(Hystrix Dashboard), Hystrix会持续的地记录所有通过Hystrix发起的请求执行信息，并以统计报表和图形的形式展示给用户，包括每秒执行多少请求多少成功，多少失败等。
+* Netfix通过hystrix-metrics-event-stream项目实现了对以上指标的监控，SpringCloud也提供了Hystrix Dashboard的整合，对监控内容转化成了可视化界面。
+
+**创建一个微服务用来做"服务监控"**:
+
+这个微服务只需要做：
+
+* application.yml中
+
+```yml
+
+server:
+  port: 9001  # 配置端口号
+
+```
+
+* 启动类
+
+```java
+
+package live.ipso.springcloud;
+
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.cloud.netflix.hystrix.dashboard.EnableHystrixDashboard;
+
+/**
+ * "服务监控"微服务启动类
+ */
+@EnableHystrixDashboard // 开启服务监控
+@SpringBootApplication
+public class HystrixDashboard_9001 {
+   public static void main(String[] args) {
+      SpringApplication.run(HystrixDashboard_9001.class, args);
+   }
+}
+
+```
+
+* 访问
+
+这里是本地测试所以访问的是：```http://localhost:9001/hystrix``` 即可看到可视化的服务监控界面
+
+* 在其它微服务中配置服务监控(配置被监控的微服务)
+
+  1. 在需要被监控的服务的pom中的dependencies节点添加spring-boot-starter-actuator监控依赖；
+  2. 开启依赖相关的断点,也就是被监控的地址
+  3. 确保已经引入熔断器的依赖spring-cloud-starter-netfix-hystrix
+
+**常见错误**：
+
+Unable to connect to Command Metric Stream
+
+这个错误就是因为上面的3个配置步骤出现问题导致的。
+
+## # Zuul路由网关
+
+Zuul路由就是针对微服务做一次路由转发，让用户不知到真正的访问路由，从而保护微服务安全
+
+**什么是Zuul**:
+
+Spring Cloud Zuul是整合Netfix公司的Zuul开源项目。Zuul包含了对请求路由和校验过滤两个主要功能：
+
+* 其中路由功能负责将外部请求转发到具体的微服务实例上，是实现外部访问的统一入口的基础
+  
+   1. 客户端请求网关/api/product，通过路由转发到product服务
+   2. 客户端请求网关/api/order，通过路由转发到order服务
+
+* 而过滤功能则负责对请求的处理过程进行干预，是实现请求校验等功能的基础
+
+Zuul和Eureka进行整合，将Zuul自身注册为Eureka服务治理中的服务，同时从Eureka中获得其他微服务的消息，也就是说以后的访问微服务都是通过Zuul跳转后获得。**注意: Zuul服务最终还是会注册进Eureka**
+
+**实现路由功能实例**：
+
+```xml
+
+<!-- pom.xml -->
+
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <parent>
+        <artifactId>microservice-cloud-01</artifactId>
+        <groupId>live.ipso.springcloud</groupId>
+        <version>1.0-SNAPSHOT</version>
+        <!--<relativePath>../microservice-cloud-01/pom.xml</relativePath>-->
+    </parent>
+    <modelVersion>4.0.0</modelVersion>
+
+    <artifactId>microservice-cloud-10-zuul-gateway-7001</artifactId>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.springframework.cloud</groupId>
+            <artifactId>spring-cloud-starter-netflix-eureka-client</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+
+        <!-- zuul路由网关依赖 -->
+        <dependency>
+            <groupId>org.springframework.cloud</groupId>
+            <artifactId>spring-cloud-starter-netflix-zuul</artifactId>
+        </dependency>
+    </dependencies>
+
+</project>
+
+```
+
+```java
+
+// 入口类
+
+package live.ipso.springcloud;
+
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.cloud.netflix.zuul.EnableZuulProxy;
+
+@EnableZuulProxy  // 开启Zuul功能
+@SpringBootApplication
+public class Zuulserver_7001 {
+   public static void main(String[] args) {
+      SpringApplication.run(Zuulserver_7001.class, args);
+   }
+}
+
+```
+
+```yml
+
+# application.yml
+
+server:
+  port: 7001
+
+spring:
+  application:
+    name: microservice-zuul-gateway  # 微服务名称
+
+# 配置服务注册到Eureka服务注册中心
+eureka:
+  client:
+    register-with-eureka: true
+    fetch-registry: true
+    service-url:
+      defaultZone: http://localhost:8084/eureka/, http://www.ipso.me:8083/eureka/
+  instance:
+    instance-id: ${spring.application.name}:${server.port}  # 指定实例ID，显示为服务名:端口
+    prefer-ip-address: true  # 访问路径可以显示IP地址
+
+# zuul路由服务配置
+zuul:
+  routes: # 路由配置，可配置多组路由
+
+    # 这是第一组路由信息
+    provider-product: # 路由名称，名称任意，路由名称唯一
+      path: /product/**  # 访问路径
+      serviceId: microservice-product # 指定服务ID(也就是服务名)会自动从Eureka中找到此服务的ip和端口
+      stripPrefix: true # true值代理转发请求时去掉前缀，false值不做处理。
+      # 如：/product/get/2  为true时： /get/2   为false时： /product/get/2
+
+      # 这是第二组路由信息
+      # provider-order:
+        # path: /order/**
+        # serviceId: microservice-order
+        # stripPrefix: false
+
+```
+
+**实现路由服务中过滤器功能实例**：
+
+**自定义过滤器**：
+
+需要继承ZuulFilter,ZuulFilter是一个抽象类，需要实现它的4个方法，如下：
+
+* filterType: 返回字符串代表过滤器的类型，返回值有：
+  1. pre: 在请求之前执行
+  2. route: 在请求路由时调用
+  3. post: 在请求路由之后调用，也就是在route、error过滤器之后调用
+  4. error: 处理请求发生错误时调用
+
+* filterOrder: 此方法返回整数值，通过此值来定义过滤器的执行顺序，数字越小优先级越高
+* shouldFilter: 返回Boolen值判断该过滤器是否执行，返回true表示要执行此过滤器，false不执行
+* run: 要执行的过滤器业务逻辑
+
+**实例**：
+
+```java
+
+// 登录验证过滤器类
+
+package live.ipso.springcloud.filter;
+
+import com.netflix.zuul.ZuulFilter;
+import com.netflix.zuul.context.RequestContext;
+import com.netflix.zuul.exception.ZuulException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.stereotype.Component;
+
+import javax.servlet.http.HttpServletRequest;
+import java.io.IOException;
+
+@Component  // 将过滤器注册的spring容器中，一定不能少了
+public class LoginFilter extends ZuulFilter {
+
+   private Logger logger = LoggerFactory.getLogger(getClass()); // 获取日志对象
+
+   /**
+    * 返回值有：
+    * 1. pre: 在请求之前执行
+    * 2. route: 在请求路由时调用
+    * 3. post: 在请求路由之后调用，也就是在route、error过滤器之后调用
+    * 4. error: 处理请求发生错误时调用
+    * @return
+    */
+   @Override
+   public String filterType() {
+      return "pre";
+   }
+
+   /**
+    * 此方法返回整数值，通过此值来定义过滤器的执行顺序，数字越小优先级越高
+    * @return int
+    */
+   @Override
+   public int filterOrder() {
+      return 1;
+   }
+
+   /**
+    * 返回Boolen值判断该过滤器是否执行，返回true表示要执行此过滤器，false不执行
+    * @return
+    */
+   @Override
+   public boolean shouldFilter() {
+      return true; // 设置为true表示当前过滤器需要执行
+   }
+
+   /**
+    * 要执行的过滤器业务逻辑
+    * @return
+    * @throws ZuulException
+    */
+   @Override
+   public Object run() throws ZuulException {
+
+      // 1. 获取请求上下文
+      RequestContext context = RequestContext.getCurrentContext();
+      HttpServletRequest request = context.getRequest(); // 获取Request
+      String token = request.getParameter("token"); // 获取token参数
+
+      // 判断是否有token, 有token表示已经登录过，可以放行
+      if (token == null){
+         // 没有登录，不进行路由转发，或者将路由转发到登录服务
+         logger.warn("此操作需要先登录系统"); // 打印日志
+         context.setSendZuulResponse(false); // 拒绝访问
+         context.setResponseStatusCode(200); // 响应状态码
+         try {
+            // 设置响应信息,它将输出在浏览器上
+            context.getResponse().getWriter().write("token is empty.... please to login");
+         } catch (IOException e) {
+            e.printStackTrace();
+         }
+         return null;
+      }
+      // token不为空，进行路由转发
+      return null;
+   }
+}
+
+```
+
+## # SpringCloud Config 分布式配置中心
+
+在分布式微服务架构中，由于微服务数量众多，使得有很多配置文件，在更新配置文件时很麻烦。我们每个微服务中都有自己的application.yml，上百个配置文件管理起来就会很麻烦，所以一套集中式的，动态的配置管理功能是必不可少的，在SpringCloud中，有分布式配置中心组件SpringCloud Config来解决这个问题。
+
+### SpringCloud Config分客户端和服务端
+
+**服务端 config server**：也就是配置服务中心，是一个集中管理配置文件的微服务
+
+**客户端 config client**：是将配置文件交给Config配置服务中心管理的每一个微服务
+
+**作用**：
+
+* 集中式管理配置文件
+* 不同环境不同配置，动态化的配置更新，根据不同环境部署，如dev/test/prod
+* 运行期间动态调整配置，不需要在每个每个服务部署的机器上编写配置，服务会向配置中心统一拉取自己的配置信息
+* 当配置发生变动时，服务不需要重启即可感知到配置的变化并使用修改后的配置信息
+* 将配置信息以REST接口的形式暴露
+
+**与github整合配置信息**：
+
+由于SpringCloud Config官方推荐使用Git来管理配置文件(也支持其它方式，如SVN和本地文件),而且使用https/http访问的形式
+
+**整合案例**：
+
+```java
+
+// 入口类
+
+package live.ipso.springcloud;
+
+
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.cloud.config.server.EnableConfigServer;
+
+@EnableConfigServer  // 配置为服务端
+@SpringBootApplication
+public class ConfigServer_5001 {
+
+   public static void main(String[] args) {
+      SpringApplication.run(ConfigServer_5001.class, args);
+   }
+}
+
+```
+
+```yml
+
+# application.yml
+
+server:
+  port: 5001
+spring:
+  application:
+    name: microservice-config
+  cloud:
+    config:
+      server:
+        git:  # 远程库的git地址
+          uri: https://github.com/ipsozzZ/Microservice-SpringCoud-Config.git
+
+```
+
+```yml
+
+# github仓库中的yml
+
+# 此yml文件是给客户端使用，而resource目录下的application.yml是给自己这个微服务使用
+spring:
+  profiles:
+    active: dev  # 激活开发环境配置
+
+server:
+  port: 4001
+
+spring:
+  profiles: dev  # 开发环境
+  application:
+    name: microservice-config-dev  # 微服务名称
+
+server:
+  port: 4002
+
+spring:
+  profiles: prod  # 开发环境
+  application:
+  name: microservice-config-prod  # 微服务名称
+
+```
+
+**调用**：
+
+* 方式1
+
+格式：/{appication}-{profile}.yml   读取的配置文件名-环境配置项.yml  (默认分支为master分支)
+例： http://localhost:5001/Microservice-config-application-dev.yml  (注意这里{application}是：Microservice-config-application。{profile}是：dev)
+
+* 方式2
+
+其它方式(master分支或非master分支)：
+
+格式：/{appication}/{profile}/{label}   读取的配置文件名/环境配置项/分支名
+例： http://localhost:5001/Microservice-config-application/dev/master
+
+* 方式3
+
+格式：/label/{appication}-{profile}.yml   /分支名/读取的配置文件名-环境配置项.yml
+例： http://localhost:5001/master/Microservice-config-application-dev.yml
+
+### 配置bootstrap.yml
+
+* application.yml 是用户级别的配置项文件
+* bootstrap.yml   是系统级别的配置项文件
+
+SpringCloud 会创建一个Bootstrap Context（bootstrap上下文）,Bootstrap Context会负责从外部资源加载配置属性并解析配置；Bootstrap属性有高优先级，默认情况下，它们不会被本地配置覆盖
+
+## SpringCloud Bus使用机制
