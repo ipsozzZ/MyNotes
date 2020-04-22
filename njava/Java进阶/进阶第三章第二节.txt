@@ -1,0 +1,27 @@
+国际化编程：
+- Internationalization，缩写i18n
+- 多语言版本的软件
+-- 一套软件，多个语言包
+-- 根据语言设定，可以切换显示文本
+
+在Java中：
+- java.util.ResourceBundle用于加载一个语言（国家语言包）
+- java.util.Locale 定义一个语言（国家）：
+
+Local类：1. 语言(zh, en等)；2. 国家/地区(CN, US); 3. 其他变量，几乎不用
+- Local类的方法：1. getAvailableLocales()返回所有的可用Locale；2. getDefault()返回默认的Locale
+
+语言文件：
+- 一个Properties文件（存储文件必须是ASCII码文件，如果是ASCII以外的文字，必须使用Unicode的表示\uxxxx；可以采用native2ascii.exe(%JAVA_HOME%\bin目录下)进行转码（转码命令：native2ascii [编译前文件] [编译后文件]））
+- 包含K-V对，每行一个K-V，例如：age=20
+- 命名规则
+-- 包名+语言+国家地区.properties，（语言和国家地区可选）以下三种命名方式均可
+-- message.properties
+-- message_zh.properties
+-- message_zh_CN.properties
+
+ResourceBandle类：
+- 根据Locale的要求，加载语言文件（Properties文件）
+- 存储语言集合中所有的K-V对
+- getString(String key)返回所对应的value
+

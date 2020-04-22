@@ -1,0 +1,65 @@
+二进制文件读写：（对同一个文件的读写必须是一样的顺序，不然会导致读的类型错误）
+- 狭义上讲，采用字节编码，非字符编码的文件。
+- 广义上来说，一切文件都是二进制文件。
+- 用记事本等无法打开/阅读。
+
+1. 写文件：
+- 先创建文件，写入数据，关闭文件。
+- FileOutputStream，BufferedOutputStream，DataOutputStream(方法：flush(刷新缓存)/write/writeBoolean/writeByte/writeChars/writeDouble/writeInt/writeUTF/......)
+- try-resource语句，自动关闭资源
+- 关闭最外层数据流，将会关闭其上的所有数据流。
+
+例子：（try-resource语句的用法与文本文件的类似，不再举例）
+public static void main(String[] args) {
+        FileOutputStream fos = null; // 节点类，负责写字节。
+        BufferedOutputStream bos = null; // 装饰类，负责写字节数据到缓存区
+        DataOutputStream dos = null; // 转化类，负责数据类型到字节的转化
+
+        try {
+            fos = new FileOutputStream("E:\\study\\notes\\test2.dat");
+            bos = new BufferedOutputStream(fos);
+            dos = new DataOutputStream(bos);
+            dos.writeBytes("我是高启明");
+            dos.writeUTF("我是IPSO");
+            dos.write(20);
+            dos.writeInt(20);
+        }catch (Exception e){
+            e.printStackTrace();
+        }finally {
+            try {
+                dos.close();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
+    }
+
+2.读文件：
+- 先打开文件，读入数据，关闭文件。
+- FileInputStream，BufferedInputStream，DataInputStream(方法：/read/readBoolean/readByte/readChars/readDouble/readInt/readUTF/......)
+- try-resource语句，自动关闭资源
+- 关闭最外层数据流，将会关闭其上的所有数据流。
+
+例子：（try-resource语句的用法与文本文件的类似，不再举例）
+public static void main(String[] args) {
+        FileInputStream fis = null; // 节点类，负责写字节。
+        BufferedInputStream bis = null; // 装饰类，负责写字节数据到缓存区
+        DataInputStream dis = null; // 转化类，负责数据类型到字节的转化
+
+        try {
+            fis = new FileInputStream("E:\\study\\notes\\test2.dat");
+            bis = new BufferedInputStream(fis);
+            dis = new DataInputStream(bis);
+            String a;
+            a = dis.readUTF();
+            System.out.println(a);
+        }catch (Exception e){
+            e.printStackTrace();
+        }finally {
+            try {
+                dis.close();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
+    }

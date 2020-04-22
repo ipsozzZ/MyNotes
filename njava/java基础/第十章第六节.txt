@@ -1,0 +1,24 @@
+JCF集合框架的工具类：
+- 不存储数据，而是在数据容器上实现一些高效的操作（排序、搜索等）
+- Arrays
+- Collections
+
+1. Arrays：处理对象是数组(即基本类型的数组)，一下仅是主要的作用
+- 排序：对数组排序，sort/parallelSort.
+- 查找：从数组中查找一个元素，binarySearch(即二分查找法).
+- 批量拷贝：从源数组批量复制到目标数组，copyOf。
+- 批量赋值：对数组进行批量赋值，fill。
+- 等价性比较：判定两个数组内容是否相同，equals。
+
+2. Collections：处理的对象是Collection及其子类
+- 排序：对List进行排序，sort。
+- 搜索：从List中查找元素，binarySearch。
+- 批量赋值：对List批量赋值，fill。
+- 最大、最小：查找集合中的最大最小值，max，min。
+- 反序：将List反序排列，reverse。
+
+3. 集合元素是对象时，若要比较大小（排序也有比较）
+
+- 在集合中比较自定义类时，需要实现Comparable接口（需要修改对象类），然后实现compareTo方法（该方法返回值：1，大于；0，等于；-1，小于。）
+
+- 新建Comparator类（使用于比较的对象类不可更改的情况），实现方法compare（返回值：1，大于；0，等于；-1，小于）。Comparator比较器将作为参数提交给工具类的sort方法。

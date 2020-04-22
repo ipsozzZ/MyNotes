@@ -1,0 +1,12 @@
+格式化类：
+1. java.text包下：java.text.Format的子类
+- NumberFormat：数字格式化，抽象类用来格式化数字，比如每隔三位数字添加一个逗号、保留几位小数等。子类是DecimalFormat。（工厂模式）
+- MessageFormat：字符串格式化，比如实现："Hello {1}!=> Hello World!"，就可以使用MessageFormat的子类实现。还可以对这个占位符的值进行格式化，如数字的时候保留几位小数等。
+- DateFormat：日期/时间格式化，抽象类，子类SimpleDateFormat（线程不安全）：
+-- parse: 将字符串格式化为时间对象
+-- format: 将时间对象格式化为字符串
+2. JDK 8后有java.time.format包下
+- DateTimeFormatter（线程安全）和SimpleDateFormat相似：
+-- ofPattern: 设定时间格式
+-- parse: 将字符串格式化为时间对象
+-- format: 将时间对象格式化为字符串

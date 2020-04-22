@@ -1,0 +1,55 @@
+Java并发框架1：
+并行模式：
+- 主从模式（Master-Slave）
+- Worker模式（Worker-Worker）
+Java并发编程：
+- Thread/Runnable/Thread组管理
+- Executer
+- Fork-Join框架
+
+线程组管理：
+线程组ThreadGroup
+- 线程的集合
+- 树形的结构，大线程组可以包括小线程组
+- 可以通过enumerate方法遍历组内的线程，执行操作
+- 能够有效管理多个线程，但是管理效率低
+- 任务分配和执行过程高度耦合
+- 重复创建线程、关闭线程操作，无法重用线程
+- 重要方法：
+-- activeCount  返回线程组中还处于active的线程数（估计数）
+-- enumerate 将线程组中active的线程拷贝到数组中
+-- interrupt 对线程组中所有的线程发出interrupt信号
+-- list  打印线程组中所有的线程信息
+
+从JDK5开始提供Executor FrameWork（具体为java.util.concurrent.*包，并发包）：
+- 分离任务的创建和执行者的创建
+- 线程重复利用（new线程代价很大）
+理解共享线程池的概念
+- 预设好的多个Thread，可弹性增加。
+- 多次执行很多很小的任务
+- 任务创建和执行过程解耦
+- 程序员无需关心线程池的执行任务过程（比如线程有可能在线程池中wait、sleep等过程，程序员都无需关心，这个个很重要）
+- 主要类：ExecutorService, ThreadPoolExecutor, Future
+-- Executors.newCachedPool/newFixedThreadPool  创建线程池（4种线程池）
+-- ExecutorService  线程池服务
+-- Callable  具体的逻辑对象实现Callable接口，并且实现call方法(Callable接口类似Runnable接口，Runnable的run方法没有返回值，这里的call方法有返回值)（线程类）
+-- Future  返回结果(线程执行结束后的结果保存在Future中)
+
+创建线程池的函数ThreadPoolExecutor参数解析：
+- int corePoolSize, 线程池中核心线程数最大值，核心线程：当有新的线程创建的时候，如果当前线程总数没达到这个值，那新建的就是核心线程，否则就是非核心线程。
+- int maximumPoolSize, 线程总数 = 核心线程数 + 非核心线程数，就是这么好理解。
+- long keepAliveTime,  该线程池中非核心线程闲置超时时长，对非核心线程起作用，如果闲置状态的时长超过这个参数所设定的时长，就会被销毁掉
+- TimeUnit unit,  keepAliveTime的单位，TimeUnit是一个枚举类型，包括：
+-- NANOSECONDS ： 1微毫秒 = 1微秒 / 1000
+-- MICROSECONDS ： 1微秒 = 1毫秒 / 1000
+-- MILLISECONDS ： 1毫秒 = 1秒 /1000
+-- SECONDS ： 秒
+-- MINUTES ： 分
+-- HOURS ： 小时
+-- DAYS ： 天
+- BlockingQueue<Runnable> workQueue,  该线程池中的任务队列（阻塞队列）：维护着等待执行的Runnable对象，当所有的核心线程都在干活时，新添加的任务会被添加到这个队列中等待处理，如果队列满了，则新建非核心线程执行任务。用得最多的有以下三种：
+-- ArrayBlockingQueue（可以限定队列的长度，接收到任务的时候，如果没有达到corePoolSize的值，则新建线程(核心线程)执行任务，如果达到了，则入队等候，如果队列已满，则新建线程(非核心线程)执行任务，又如果总线程数到了maximumPoolSize，并且队列也满了，则发生错误）
+-- LinkedBlockingQueue（这个队列的总线程数被corePoolSize所限制，如果有新任务进来，核心线程已满，则需要等待，导致maximumPoolSize在这个队列中不起作用。）
+-- SynchronousQueue（这个队列接收到任务的时候，会直接提交给线程处理，如果所有线程都忙，那就新建线程来处理，此时maximumPoolSize应指定为Integer.MAX_VALUE为无限大。）
+- ThreadFactory threadFactory, 创建线程的方式，这是一个接口，new 它的时候需要实现newThread方法，一般用不上。
+- RejectedExecutionHandler handler， 就是抛出异常专用的，比如上面提到的两个错误发生了，就会由这个handler抛出异常，不指定也有个默认的，所以，完全可以不填。

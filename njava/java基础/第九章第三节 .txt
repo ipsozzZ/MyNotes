@@ -1,0 +1,7 @@
+自定义异常：
+- 继承自Exception，就变成Checked Exception异常，即编译器会检查异常是否已经处理
+- 继承自RuntimeException， 就会变成C=Unchecked Exception
+自定义重点在于构造函数
+- 调用父类Exception的message构造函数
+- 可以自定义自己的成员变量
+- 在程序中采用throw主动抛出异常

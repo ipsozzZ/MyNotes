@@ -1,0 +1,20 @@
+文件内容的操作：（文件存储是以字节的形式存储的）
+java.io包中关于文件操作的类：
+- 节点类：直接对文件进行读写
+- 包装类：比如：转化类（字节/字符/数据类型的转化）、装饰节点类
+- File类：对文件的属性进行读写等操作。
+- 其他类：system.in、system.out、system.error等
+
+1. 节点类：四个主要类：
+- InputStream（子类FileInputStream，数据从文件读取到Java中）、OutputStream（子类FileOutputStream，数据从Java输出到文件中），操作的是字节流
+- Reader（子类FileReader）、Writer（子类FileWriter），操作的是字符流
+
+2. 
+2.1 转化类：字符到字节之间的转化：
+- InputStreamReader：文件读取时字节转化为Java能够理解的字符。
+- OutputStreamWriter：Java将字符转化为字节输入到文件中
+
+2.2 装饰类：装饰节点类
+- DataInputStream、DataOutputStream：封装数据流。
+- BufferedInputStream，BufferedOutputStream：缓存字节流（由于cpu的执行效率是非常高的，且内存的效率也是远高于硬盘，所以当从硬盘读写数据时，可以在内存开辟缓存空间，以平衡三者之间的执行速率差）
+- BufferedReader，BufferedWriter：缓存字符流。

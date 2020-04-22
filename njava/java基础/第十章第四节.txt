@@ -1,0 +1,32 @@
+散列Set：
+- 确定性：对任意对象都能判定其是否属于某一个集合
+- 互异性：集合内每个元素都是不相同的，注意是内容互异
+- 无序性：集合内的顺序无关
+
+Set的实现类：
+- HashSet（基于散列函数的集合，无序，不支持同步）
+- TreeSet（基于树结构的集合，可排序的，不支持同步）
+- LinkedHashSet（基于散列函数和双向链表的，可排序的，不支持同步）
+
+1. HashSet：
+- 基于HashMap实现的，可以容纳null元素，不支持同步
+- retainAll()方法是计算两个集合的交集
+- 遍历性能比较：foreach性能远比迭代器要好
+
+2. LinkedHashSet：
+- 继承HashSet，也是基于HashMap实现的，可以容纳null元素，不支持同步
+- 方法和HashSet基本一致
+- 通过一个双链表维护插入顺序（这也是和HashSet的差别，即LinkedHashSet的插入顺序是保留的）
+
+3. TreeSet:
+- 基于TreeMap实现的，不可以容纳null元素，不支持同步
+- 根据compareTo方法或指定Comparator排序
+
+4. 判定元素重复的方法：
+- HashSet和LinkedHashSet判定元素重复的原则是：
+-- 判定两个元素的HashCode返回值是否相同，若不同，则返回false
+-- 若两个元素的HashCode返回值相同，则判定equals方法，若不同，则返回false，否则返回true
+
+- TreeSet判定元素重复的原则：
+-- 需要元素继承自Comparable接口
+-- 比较两个元素的compareTo方法

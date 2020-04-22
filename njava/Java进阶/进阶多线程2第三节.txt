@@ -1,0 +1,12 @@
+Java并发数据结构1：
+传统的Vector，Hashtable等同步集合性能过差
+并发数据结构：数据添加和删除
+- 阻塞式集合：当集合为空或者为满时，等待
+- 非阻塞式集合：当集合为空或者为满时不等待，返回null或异常
+
+List中有：CopyOnWriteArrayList 读多写少，基于复制机制，非阻塞
+Set中有：CopyOnWriteArraySet（基于CopyOnWriteArrayList实现），读多写少，非阻塞
+Map中有：ConcurrentHashMap 读多写少，非阻塞
+Queue & Deque(队列，Deque双向队列，JDK1.5提出)：
+- ConcurrentLinkedQueue  非阻塞
+- ArrayBlockingQueue/LinkedBlockingQueue  阻塞

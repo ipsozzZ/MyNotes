@@ -1,0 +1,36 @@
+文件属性操作：
+java.io.File：
+- 是文件和目录的重要类(JDK6及以前是唯一)，目录也使用File类进行表示
+- File类与OS无关，但会受到OS的权限限制
+- 常用方法：createNewFile, delete,exists, getAbsolutePath, getName,getParent, getPath, isDirectory, isFile, length, listFiles, mkdir, mkdirs等。
+- 注意：File不涉及到具体的文件内容，只涉及属性
+
+Java 7提出的NIO包，提出新的文件系统类包括：Path，Files，DirectoryStream，FileVisitor，FileSystem，这些类并不是要替代io包下的File，而是对java.io.File的有益补充。包括：
+- 文件复制和移动
+- 文件相对路径
+- 递归遍历目录
+- 递归删除目录
+- 等等
+
+Path:
+案例1：
+获取Path对象的三种方法：
+1. Path path = FileSystems.getDefault().getPath("c:/temp", "test.txt");
+2. File file = new File("c:/temp/test.txt"); Path path = file.toPath();
+3. Path path = Paths.get("c:/temp/test.txt");
+
+案例2：
+合并两个路径：
+Path path = Paths.get("c:/temp");
+path.resolve("test.txt");
+
+Files:
+文件的移动等
+
+DirectoryStream：
+遍历目录中的条目（也可以带有过滤条件的遍历目录中的条目，比如获取".txt"结尾的文件）
+
+案例：
+在“E:\study\notes”目录下遍历获取".txt"结尾的文件
+
+

@@ -1,0 +1,117 @@
+文本文件的读写：
+文件类型：
+- 一般文本文件(若干行字符组成的文件)，如txt等
+- 一般二进制文件，如数据文件.dat
+- 带特殊格式的文本文件，如xml文件
+- 带特殊格式的二进制文件，如doc、ppt等
+
+1. 写文件：
+- 先创建文件，写入数据，关闭文件。
+- FileOutputStream(节点类，负责写字节)，OutputStreamWriter(转化类，负责字符到字节的转化)，BufferedWriter（装饰类，负责写字符到缓存区，方法：writer，newLine），关系是（BufferedWriter(OutputStreamWriter(FileOutputStream))）,所以关闭资源时只用关闭最外层即BufferedWriter即可。
+- try-resource语句（JDK7及以上），自动关闭资源
+- 关闭最外层的数据流，将会把其上所有的数据流关闭
+
+例子：（注意：这里的写数据到文件是将原文件中的内容也全部清除）
+public static void main(String[] args) {
+
+        // 查看是否存在文件，没有就新建文件
+        File file = new File("E:\\study\\notes\\test.txt");
+        if (!file.exists()){
+            try {
+                file.createNewFile();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
+
+        FileOutputStream fs = null; // 写字节流
+        OutputStreamWriter ow = null; // 将字符转换成字节流
+        BufferedWriter bw = null; // 写字符到缓存区
+
+        try {
+            fs = new FileOutputStream("E:\\study\\notes\\test.txt");
+            ow = new OutputStreamWriter(fs, "UTF-8");
+            bw = new BufferedWriter(ow);
+            bw.write("I am Ipso");
+            bw.newLine();
+            bw.write("And you？");
+            bw.newLine();
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        finally {
+            try {
+                bw.close(); // 关闭最后一个类将所有上面用到的资源都关闭
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
+    }
+
+使用try-resource语句（JDK7及以上）实现以上例子：（注意：这里的try是有小括号的，正常的try-catch语句try是没有小括号的，而且这里的写数据到文件是将原文件中的内容也全部清除）
+
+public static void main(String[] args) {
+
+        // 查看是否存在文件，没有就新建文件
+        File file = new File("E:\\study\\notes\\test.txt");
+        if (!file.exists()){
+            try {
+                file.createNewFile();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
+
+        try(BufferedWriter bw = new BufferedWriter(new OutputStreamWriter(new FileOutputStream("E:\\study\\notes\\test.txt")))){
+            bw.write("您也好！");
+            bw.newLine();
+            bw.write("我是 gqm2");
+            bw.newLine();
+        }catch (Exception ex){
+            ex.printStackTrace();
+        }
+    }
+
+2. 读文件：
+- 先打开文件，逐行读入数据，关闭文件。
+- FileInputStream，InputStreamReader，BufferedReader(方法：readLine)
+- try-resource语句，自动关闭资源。
+- 关闭最外层数据流，将会将其上所有的数据流关闭。
+
+例子：
+public static void main(String[] args) {
+        FileInputStream fis = null;
+        InputStreamReader isr = null;
+        BufferedReader br = null;
+
+        try {
+            fis = new FileInputStream("E:\\study\\notes\\test.txt");
+            isr = new InputStreamReader(fis, "UTF-8");
+            br = new BufferedReader(isr);
+            String firstLine = br.readLine();
+            System.out.println("我是第一行：" + firstLine);
+            System.out.println("我是第二行：" + br.readLine());
+
+        }catch (Exception e){
+            e.printStackTrace();
+        }finally {
+            try {
+                br.close();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
+    }
+
+try-resource语句实现上面读文件功能：
+ public static void main(String[] args) {
+
+        try(BufferedReader br = new BufferedReader(new InputStreamReader(new FileInputStream("E:\\study\\notes\\test.txt"), "UTF-8"))) {
+            String firstLine = br.readLine();
+            System.out.println("我是第一行：" + firstLine);
+            System.out.println("我是第二行：" + br.readLine());
+
+        }catch (Exception e){
+            e.printStackTrace();
+        }
+    }

@@ -1,0 +1,10 @@
+异常分类：
+Java中Throwable：
+- Error：硬件资源耗尽等
+- Exception（程序有关的异常）：
+1. 分类方式一：
+-- 非RuntimeException(典型的有IOException):外界相关的错误，如打开一个不存在的文件；加载一个不存在的类；连接不存在的数据库......
+-- RuntimeException：程序自身的错误，如：5/0；空指针；数组越界......
+2. 分类方式二：
+-- Unchecked Exception：(编译器不会辅助检查的，需要程序员自己管理)异常，包括Error子类和RuntimeException子类。
+-- Checked Exception：非RuntimeException的子类（编译器会辅助检查的异常）

@@ -1,0 +1,6 @@
+异常处理：
+try-catch-finally：一种保护代码正常运行的机制。
+异常处理结构：try必须有，catch和finally至少有其中一个
+- try...catch(catch可以有多个)
+- try...catch... finally
+- try...finally

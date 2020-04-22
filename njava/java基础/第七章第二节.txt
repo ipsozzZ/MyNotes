@@ -1,0 +1,7 @@
+Jar：
+1. jar是Java类的字节码的集合
+
+String：
+String str = "ipso"; 
+str.capacity(); // 获取字符串所占内存空间大小；StringBuffer的初始大小为16+初始字符串长度。
+// 在StringBuffer中一旦length大于capacity时，capacity便在前一次的基础上加1然后翻倍。如果新append的字符串超过加1再翻倍后的空间将以最新的长度更换。

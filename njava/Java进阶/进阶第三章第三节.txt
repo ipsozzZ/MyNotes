@@ -1,0 +1,49 @@
+Java高级字符串处理
+
+1. Java正则表达式：
+java.util.regex包：
+- Pattern正则表达式的编译表示
+-- compile 编译一个正则表达式为Pattern对象
+-- matcher 用Pattern对象匹配一个字符串，返回匹配结果
+
+- Matcher：
+-- Index 方法（位置方法）：start(),start(int group), end(), end(int group)
+-- Study 方法（查找方法）：lookingAt()这是部分匹配, find(), find(int start), matchers()这是完全匹配
+-- Replacement 方法(替换方法)：replaceAll(String replacement) 
+
+2. 其他字符串处理：
+- 字符串和集合互转：String类(JDK 8及更高版本)中有一个方法是join()方法，将一个集合以某种分割符连接起来
+- 字符串转义
+- 变量名字格式化
+- 字符串输入流：
+-- 将字符串转为一个输入流
+-- 输入流可以定义为Scanner，这是Online Judge（在线程序提交的原理）的实现原理
+--- 例子：OJ平台输入的原理：
+import java.io.*;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Scanner;
+import org.apache.commons.io.Charsets;
+
+public class OutStream {
+    public static void main(String[] args) {
+        
+        List<String> names = new ArrayList<>();
+        names.add("xiaoming");
+        names.add("daming");
+        names.add("xiaobai");
+
+        String str1 = String.join(",", names);
+        System.out.println(str1);
+        InputStream in = IOUtils.toInputStream(str1, Charsets.toCahrset("UTF-8"));
+        System.setIn(in); // 将上面的InputStream流变成System.in输入流，我们知道System.out是输出流
+
+        // 模拟键盘输入，这也是OJ平台测试用例输入的原理
+        // 此处可以换成文件输入流
+        Scanner sc = new Scanner(System.in);
+        sc.useDelimiter(",");
+        while (sc.hasNext()){
+            System.out.println(sc.next());
+        }
+    }
+}

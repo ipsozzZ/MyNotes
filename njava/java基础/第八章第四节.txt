@@ -1,0 +1,23 @@
+时间类：
+1. java.util.Date(基本废弃)：常用getTime()方法，返回自1970.1.1以来的毫秒数。
+2. java.sql.Date(和数据库对应的时间类)
+3. Calendar是目前程序中最常用的，但是是抽象类，并且线程不安全。
+--Calendar gc = Calendar.getInstance(); // 通过getInstance()方法返回的是其子类GregorianCalendar的一个实例(我们知道抽象类是不可以实例化的)
+--Calendar gc = new GregorianCalendar(); //上面相当于直接实例化其子类对象。
+--是简单工厂模式实现的
+4. Calendar中的主要函数：
+- get(field) 获取时间中每个属性的值，注意月份的值是0~11。如：Calendar gc = Calendar.getInstance();  int year = gc.get(Calendar.YEAR); 获取小时：int hour= gc.get(Calendar.HOUR);int Hour= gc.get(Calendar.HOUR_OF_DAY); // 24小时表示。此外获取星期：int week = gc.get(Calendar.DAY_OF_WEEK); 注意英语国家星期是从星期日开始计算的
+- getTime() 返回相应的Date（java.util.Date）对象。
+- getTimeInMillis() 返回自1970.1.1以来的毫秒数。
+- set(field) 设置时间字段。问：当前月的最后一天？假设当前月是currMonth = 6; 先求出当前下个月的第一天：gc.set(gc.get(Calendar.YEAR), currMonth, 1); 再将其减去一天即可得到当前月的最后一天：gc.add(Calendar.DATE, -1);
+- add(field, amount) 根据指定字段增加/减少时间。问：今天的一年后是什么时间？gc.add(Calendar.YEAR, 1); 一月后是什么时间类似。其他类似
+- roll(field, amount) 根据指定字段增加/减少时间，但不影响上一级的时间段(月份或年份等)。
+5. JDK 8 推出新的时间API即java.time包。旧的时间有重名(java.util.Date和java.sql.Date)、线程不安全(Calendar)等缺点。
+新版本的特点：
+- 不变性，在多线程环境下
+- 遵循设计模式，设计得更好，可扩展性强
+6. java.time包有很多子包，重点关注java.time包的一下几个重要的类：
+- LocalDate：日期类，只负责日期不管时间
+- LocalTime：时间类(时分秒-纳秒)，只负责时间不管日期。
+- LocalDateTime：LocalDate + LocalTime
+- Instant：时间戳

@@ -1,0 +1,5 @@
+Java对zip文件的读写：
+Java Zip包：java.util.zip包。支持Zip和Gzip的压缩与解压缩：
+- java.io.InputStream, java.io.OutputStream的子类。
+- ZipInputStream, ZipOutputStream压缩文件的输入输出流。
+- ZipEntry 压缩项。

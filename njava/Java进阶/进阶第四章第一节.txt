@@ -1,0 +1,62 @@
+Java图像处理：
+关键类：
+图形：
+java.awt包（逐渐被淘汰，仅保留一些关键类）：
+- Java2D库：Graphics2D,Line2D,Rectangle2D,Ellipse2D,Arc2D.
+- Color,Stroke
+
+图像：
+javax.imageio包，主要读写图片文件：ImageIO
+其他包中的关键类：BufferedImage(包含方法：getHeight，getWidth)，ImageReader，ImageWriter
+
+
+条形码/二维码：
+Java本身并没有处理条形码和二维码的能力，可以通过Google公司提供的开源程序包：Zxing(Zebra Crossing):
+主要的类：
+- BitMatrix 位图矩阵
+- MultiFormatWriter 位图编写器
+- MatrixToImageWriter 写入图片
+
+word（doc/docx）处理：
+Java本身是没有办法处理doc/docx文件的，需要依靠第三方包如：
+- Jacob，COM4J：（windows平台）
+- POI（纯Java），docx4j（纯Java），OpenOffice/Libre Office SDK：（免费）
+- Aspose（收费）
+- 一些开源的OpenXML的包
+
+POI：
+- Apache（apache出品必属精品）POI：poi.apache.org包
+- 可以处理docx, xlsx, pptx, visio等office套件
+- 纯Java工具包，无需第三方依赖
+- 主要类有：
+-- XWPFDocument  整个文档对象
+-- XWPFParagraph  段落（回车就是一个段落）
+-- XWPFRun            一个片段（字体样式相同的一段）
+-- XWPFPicture       图片
+-- XWPFTable         表格
+
+xls/xlsxwen文件处理（excel文件）：实现解析和生成
+- Java本身不能处理excel文件,通过第三放库：
+- POI，jxl（免费，早期很流行）
+- COM4J（windows平台,只能部署在windows平台）
+- Aspose（收费)
+- 主要类：
+-- XSSFWorkbook  整个文档对象
+-- XSSFSheet         单个Sheet对象
+-- XSSFRow           一行对象
+-- XSSFCell           一个单元格对象
+
+PDF文件处理：解析和生成
+- pdf底层是用PostScript实现的，是Adobe公司的产品，pdf文档在任何平台上都可以保证内容的格式不变化
+- Java本身无法处理pdf文件，需要调用第三方库：
+- Apache PDFBox（免费）
+- iText（收费）
+- XDocReport（将docx转化为pdf文件）
+
+PDFBox：
+- 纯Java类库
+- 主要功能：创建，提取文本，分割/合并/删除，....
+- 主要类：
+-- PDDocument        pdf文档对象
+-- PDFTtextStripper  pdf文本对象
+-- PDFMergerUtility  合并工具

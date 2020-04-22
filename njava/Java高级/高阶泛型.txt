@@ -1,0 +1,42 @@
+泛型（Generic Programming，JDK1.5后引入）：
+- 本质：参数化类型、避免类型转换、代码可复用。class（因此JVM中也没有）中是不存在泛型对象的，而是采用"类型擦除"技术,只有普通类和方法；
+- 类型擦除技术：如果一个类为泛型类并且没有继承任何父类或者实现任何接口，编译出来的Class文件是将泛型变量T替换为Object对象，这就是类型擦除技术；如果有继承父类和实现其他接口，则将T替换成为其父类；如果没有继承父类，仅实现了多个接口，则将T替换成第一个接口
+- 擦除类型变量后，为了保证类型的安全性，需要自动进行类型转换（这是编译器的工作）
+- 擦除类型变量后，如果该泛型类存在子类，并且子类中有重载父类的方法，这编译器会产生自动桥来保证子类方法的正确调用。
+- 泛型类列举：ArrayList、HastSet、HashMap等(有尖括号)
+- 泛型方法Collections.binarySearch, Arrays.sort等
+- 泛型接口：List，Iterator等
+
+自定义泛型设计：
+1. 泛型类：
+- 具有泛型变量的类
+- 在类名后用<T>代表引入类型（多个字母表示多个引入类型，如<T,U>等；引入类型可以修饰成员变量，如成员变量/局部变量/参数/返回值；没有专门的template关键字），有约定熟成的规定就是：单个元素用E(Element)表示，如ArrayList<E>;K表示key，V表示value,如HashMap<K,V>;自定义泛型变量常用T(Template)表示，但不强制要求
+
+例子：
+public class MyCalss<T>{
+     private T lower;https://timgsa.baidu.com/timg?image&quality=80&size=b9999_10000&sec=1584253794372&di=7eac5ff585c366b18505e11e8e92da8e&imgtype=0&src=http%3A%2F%2Fn.sinaimg.cn%2Fent%2F4_img%2Fupload%2Ffc30f998%2F20170328%2FUKqQ-fyctevp8942635.jpg
+     private T upper;
+     public MyClass(T lower, T upper){
+          this.lower  = lower;
+          this.upper = upper;
+    }
+
+    public T getLower(){
+         return lower;
+    }
+    ....
+}
+
+2. 泛型方法：
+- 具有泛型参数的方法
+- 泛型方法可以在普通类中也可以在泛型类中
+- <T>在修饰符后，返回类型前
+- 如：
+public class MyClass{
+     public static <T> T getValue(T a，...){...}    // 这里泛型是<T>, 返回值是没有尖括号的T，小括号中的T是参数类型（注意<T>决定所有T的类型）
+}
+
+3. 泛型接口：
+- 和泛型类类似，在类名后加<T>
+- T用来指定方法返回值和参数
+- 实现接口时，指定类型

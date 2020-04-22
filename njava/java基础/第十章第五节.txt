@@ -1,0 +1,33 @@
+Java中的Map：
+- Hashtable（同步，慢，数据量小）
+- HashMap（不支持同步，快，数据量大）
+- Properties（同步，文件形式，数据量小）
+
+1. Hashtable
+- K-V对，K和V都不允许为null
+- 同步，多线程安全
+- 无序的
+- 适合小数据量
+- 主要方法：clear, contains/containsValue, containsKey, get, put, remove,size
+- 遍历性能：三种遍历方法分别是1. 根据Entry迭代器遍历；2. 根据key的迭代器，再通过key得到Value方式遍历；3. 根据key的Enuneration遍历。三种遍历性能相差不大
+
+2. HashMap
+- K-V对，K和V都允许为null
+- 不同步线程不安全，这里可以通过工具类Conllections.synchronizedMap(new HashMap(...));实现同步
+- 无序的
+- 主要方法：clear, containsValue, containsKey, get, put, remove,size
+- 遍历性能：两种遍历方法：1. 根据Entry迭代器遍历；2. 根据key的迭代器，再通过key得到Value方式遍历（比Entry迭代器遍历略快一些）；
+
+3. LinkedHashMap
+- 基于双向链表的维持插入顺序的HashMap
+
+4. TreeMap
+- 基于红黑树的Map，可以根据key的自然排序或者CompareTo()方法进行排序输出
+
+5. Properties
+- 继承与Hashtable
+- 可以将K-V对保存到文件中
+- 适用于数据量少的配置文件
+- 继承自Hashtable的方法：clear, contains/containsValue, containsKey, get, put, remove,size
+- 从文件加载的Load方法(加载的是所有的K-V对)，写入到文件中的store方法（将所有的K-V对写入到文件中）
+- 获取属性getProperty，设置属性setProperty

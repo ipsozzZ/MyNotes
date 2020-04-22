@@ -1,0 +1,6 @@
+Java并发框架2：Fork-Join（Java7提供的另一种并行框架：分解、治理、合并（分治编程））；适合用于整体任务不好确定的场合（最小任务可确定）
+- 关键类：
+-- ForkJoinPool
+-- RecursiveAction
+-- RecursiveTask
+-- 参数有部分和Executor方式的类似

@@ -1,0 +1,5 @@
+1. 在类中static修饰的变量称为静态变量，变量名相同时所有的对象都只使用同一个静态变量。
+2. final修饰基本类型变量，则变量不能被修改，final修饰普通成员方法，方法不能再被重写，但是可以重载，final修饰类的实例即对象，对象里的值可以被修改，但是该对象不能被再次赋值new对象。
+3. Java中的常量设计（Java中没有constant关键字类修饰常量，根据常量的特性我们可以使用public static final 常量名 = 常量值的形式来表示Java中的常量）；接口中的变量默认就是常量（即会自动默认public static final ...）。
+4. 常量池（除float和double外其他基本类型的包装类的变量赋值建立常量池；String类型有字符串常量池）Byte：-128~127；Character：0~127（其对应的askll码值）；Short、Integer、Long：-128~127；Float、Double没有缓存（常量池）；String类型只要是确定的值（双引号引起来的值）或者是通过字符串连接符号连接的确定的值即可建立字符串常量池。所谓常量池就是为了多个变量指向常量池中同一个地址的值，节省内存消耗。常量池存放在栈空间中，普通对象类型变量存放在堆内存中。
+5. 测试某段代码所使用的时间可以这样设计：首先引入java.util.Calendar包，代码段前Calendar t1 = Calendar.getInstance();代码段后System.out.println(t2.getTimeInMillis()-t1.getTimeInMillis());即可打印代码执行时间

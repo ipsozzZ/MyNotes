@@ -1,0 +1,37 @@
+JCF(Java Collection Framework)容器框架：
+- 对外的接口：容器中所能存放的抽象数据类型
+- 接口的实现：可复用的数据结构
+- 算法：对数据的查找和排序
+
+JCF集合框架结构：
+Object:
+- Collection(AbstractCollection):
+-- 列表List(AbstractList):
+--- AbstractSequentialList -> LinkedList
+--- ArrayList
+--- Vector -> Stack
+
+-- 散列集Set(AbstractSet)
+--- HashSet -> LinkedHashSet
+--- TreeSet
+-- SortedSet
+--- TreeSet
+
+- 映射Map(AbstractMap)
+-- HashMap
+--- LinkedHashMap
+-- TreeMap
+-- SortedMap
+--- TreeMap
+
+工具类(算法类)：
+- Arrays：对数组进行查找和排序等操作
+- Collections：对Collection及其子类进行排序和查找操作
+
+集合框架JCF的集合接口是Collection
+- add, contains,remove,size
+- iterator
+JCF的迭代器接口Iterator(遵循迭代器模式)
+- hasNext：判断是否有下一个元素
+- next：获取下一个元素
+- remove：删除某一个元素
