@@ -1515,9 +1515,7 @@ server:
   port: 8080
 
 spring:
-  mvc:
-    servlet:
-      load-on-startup: 1
+   
   datasource:
     driver-class-name: com.mysql.jdbc.Driver
     url: jdbc:mysql://localhost:3306/spring?useUnicode=true&characterEncoding=utf8&serverTimezone=GMT%2B8
