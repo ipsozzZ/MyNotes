@@ -259,4 +259,3 @@ slice：表示目标切片对象；
 6. 两个相同类型的 nil 值也可能无法比较
 7. nil 是 map、slice、pointer、channel、func、interface 的零值
 8. 不同类型的 nil 值占用的内存大小可能是不一样的
-
