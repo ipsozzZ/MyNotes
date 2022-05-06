@@ -1711,13 +1711,68 @@ func levelOrder(root *TreeNode) (ret [][]int) {
 		}
 		q = nextLevel
 	}
-	return ret
+	return
 }
 
 // 107. 二叉树的层序遍历 II
-//func levelOrderBottom(root *TreeNode) [][]int {
-//
-//}
+func levelOrderBottom(root *TreeNode) (ret [][]int) {
+	ret = make([][]int, 0)
+	if root == nil {
+		return
+	}
+	var q = []*TreeNode{root}
+	for i := 0; len(q) > 0; i++ {
+		ret = append(ret, make([]int, 0))
+		var nextLevel []*TreeNode
+		for j := 0; j < len(q); j++ {
+			var node = q[j]
+			ret[i] = append(ret[i], node.Val)
+			if node.Left != nil {
+				nextLevel = append(nextLevel, node.Left)
+			}
+			if node.Right != nil {
+				nextLevel = append(nextLevel, node.Right)
+			}
+		}
+		q = nextLevel
+	}
+	// 调整层序
+	for i := 0; i < len(ret) / 2; i++ {
+		ret[i], ret[len(ret) - 1 - i] = ret[len(ret) - 1 - i], ret[i]
+	}
+
+	return
+}
+
+// 103. 二叉树的锯齿形层序遍历
+func zigzagLevelOrder(root *TreeNode) (ans [][]int) {
+	if root == nil {
+		return
+	}
+	queue := []*TreeNode{root}
+	for level := 0; len(queue) > 0; level++ {
+		var vals []int
+		q := queue
+		queue = nil
+		for _, node := range q {
+			vals = append(vals, node.Val)
+			if node.Left != nil {
+				queue = append(queue, node.Left)
+			}
+			if node.Right != nil {
+				queue = append(queue, node.Right)
+			}
+		}
+		// 本质上和层序遍历一样，我们只需要把奇数层的元素翻转即可
+		if level%2 == 1 {
+			for i, n := 0, len(vals); i < n/2; i++ {
+				vals[i], vals[n-1-i] = vals[n-1-i], vals[i]
+			}
+		}
+		ans = append(ans, vals)
+	}
+	return
+}
 
 
 // 95 不同的二叉搜索树II
@@ -1748,5 +1803,23 @@ func searchTree(start, end int) (st []*TreeNode) {
 			}
 		}
 	}
+	return
+}
+
+
+// 105. 从前序与中序遍历序列构造二叉树
+func buildTree(preorder []int, inorder []int) (trees *TreeNode) {
+	if len(preorder) != len(inorder) || len(preorder) == 0 {
+		return nil
+	}
+	trees = &TreeNode{Val: preorder[0]}
+	var i, v int
+	for i, v = range inorder {
+		if v == preorder[0] {
+			break
+		}
+	}
+	trees.Left = buildTree(preorder[1:len(inorder[:i])+1], inorder[:i])
+	trees.Right = buildTree(preorder[len(inorder[:i])+1:], inorder[i+1:])
 	return
 }
