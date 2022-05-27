@@ -2,9 +2,14 @@ package main
 
 import (
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"math"
 	"math/big"
+	"regexp"
 	"sort"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -1822,4 +1827,151 @@ func buildTree(preorder []int, inorder []int) (trees *TreeNode) {
 	trees.Left = buildTree(preorder[1:len(inorder[:i])+1], inorder[:i])
 	trees.Right = buildTree(preorder[len(inorder[:i])+1:], inorder[i+1:])
 	return
+}
+
+// 114. 二叉树展开为链表
+func flatten(root *TreeNode) (ntree *TreeNode) {
+	if root == nil {
+		return
+	}
+
+	ntree = nodeChange(root)
+	return
+}
+
+func nodeChange(root *TreeNode) (ret *TreeNode) {
+	if root == nil {
+		return
+	}
+	ret = &TreeNode{}
+	ret.Val = root.Val
+	ret.Left = nil
+
+
+	if root.Left != nil && root.Right == nil {
+		ret.Right = nodeChange(root.Left)
+	} else if root.Right != nil && root.Left == nil {
+		ret.Right = nodeChange(root.Right)
+	}  else if root.Right == nil && root.Left == nil {
+		return
+	} else {
+
+		ret.Right = nodeChange(root.Left)
+
+		var ntree = nodeChange(root.Right)
+
+		for node := ret.Right; node != nil; node = node.Right {
+			if node.Right == nil {
+				node.Right = ntree
+				break
+			}
+		}
+	}
+	return
+}
+
+
+
+// 114. 二叉树展开为链表
+func flatten1(root *TreeNode) {
+	if root == nil {
+		return
+	}
+	var ntree = nodeChange1(root)
+	for i := 1; i < len(ntree); i++ {
+		var pre, curr = ntree[i-1],ntree[i]
+		pre.Left, pre.Right = nil, curr
+	}
+}
+
+func nodeChange1(root *TreeNode) (ret []*TreeNode) {
+	if root == nil {
+		return
+	}
+	ret = []*TreeNode{root}
+	ret = append(ret, nodeChange1(root.Left)...)
+	ret = append(ret, nodeChange1(root.Right)...)
+	return
+}
+
+
+func Test9500(t *testing.T) {
+	var text = "ContinuousOpenrr=1;"
+	var re = regexp.MustCompile("ContinuousOpen*[1-9]*")
+
+	var ss = re.FindString(text)
+	t.Logf("patten === %s, \n", ss)
+
+	var re1 = regexp.MustCompile(`^ContinuousOpen([\d]*)$`)
+	var sli = re1.FindStringSubmatch(ss)
+	t.Logf("patten1 0 === %s, \n", sli)
+	t.Logf("patten1 1 === %d, \n", len(sli))
+	t.Logf("patten1 2 === %d, \n", Str2Int32(sli[1]))
+
+	var attribute = 1 << 2 // 默认创建就入座
+	//attribute += 0 << 4    // 默认创建就入座
+	t.Logf("========= 3 === %d, \n", attribute)
+	//t.Logf("patten1 1 === %s, \n", sli[0])
+	//t.Logf("patten1 2 === %s, \n", sli[1])
+}
+
+// string 转 int32
+func Str2Int32(s string) int32 {
+	j, err := strconv.ParseInt(s, 10, 32)
+	if err == nil {
+		return int32(j)
+	}
+	return 0
+}
+
+
+func Test95000(t *testing.T) {
+
+	rr := make(map[int32]string)
+	rr[1] = "1"
+	rr[2] = "1"
+	rr[3] = "1"
+	rr[4] = "1"
+	rr[5] = "1111"
+
+	var req = make([]*int32, 0, len(rr))
+	for k := range rr {
+		var a = k
+		req = append(req, &a)
+	}
+
+	var j int
+	t.Logf("==len== %d, \n", len(req))
+	for j = 0; j < len(req); j++ {
+		t.Logf("==== %d, \n", *req[j])
+	}
+
+	var tttt string
+	var ok bool
+	if tttt, ok = rr[6]; !ok {
+		tttt = "0000"
+	}
+	t.Logf("tttt ==== %s, \n", tttt)
+}
+
+
+// golang 词法->语法解析，生成ast语法树
+var srcCode = `
+package hello
+
+import "fmt"
+
+func greet() {
+    var msg = "Hello World!"
+    fmt.Println(msg)
+}
+`
+func Test950000(t *testing.T) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "", srcCode, 0)
+	if err != nil {
+		t.Logf("err = %s \n", err)
+	}
+	_ = ast.Print(fset, f)
+
 }
