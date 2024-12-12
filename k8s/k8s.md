@@ -161,6 +161,85 @@ ls /
 
 那么，在 Docker 项目中，又是如何使用这种 Union File System 的呢？
 
-而这个目录的作用，我们不妨通过一个具体例子来看一下。
+Docker运行时由镜像层(image layers)和容器层(container layer)组成。镜像层就是执行Docker image命令时看到的镜像，这些层是只读的。容器层则是创建Docker容器后添加的可写层，所有创建的数据放在可写层中。
+
+Docker Storage Driver(后文统称：Docker存储驱动)把Docker的镜像层和容器层进行组合，得到我们所看到的文件系统，即进入容器后看到的文件系统。
+
+由于不同操作系统(如：CentOS、Ubuntu等)对Docker的支持不一致，所以存在多种存储驱动。接下来我们将深入介绍一下，常见的Docker存储驱动：Aufs、OverlayFs、DeviceMapper，这里主要介绍Aufs和OverlayFs。
+
+##### 一. AUFS
+
+1. 镜像层结构
+AUFS是一个联合文件系统，在linux主机上将多个目录分层，并将它们显示为单个目录。这些目录在AUFS术语中称为分支，对应Docker镜像中的层。
+
+接下来，我们以centos镜像为例，说明Aufs文件系统
+
+diff：对应容器的镜像每一层的内容，每个文件夹代表一个层
+
+layers：镜像各层之间依赖关系，每个文件代表一个层，每个文件中按照自上而下的顺序存储着其他镜像层的ID
+
+mnt: 容器最终看到的文件系统的样子，每个正在运行的容器的统一文件系统的挂载点，与容器内完全相同
+
+2. 启动容器
+容器启动后会在mnt目录下生成2个新文件夹(简称xxxx和xxxx-init)，init这一层用来记录容器启动时根据系统环境和用户配置自动生成的内容，然后将镜像层+xxxx-init层联合挂载到mnt目录下的xxxx文件夹下。
+
+启动容器后 mnt、layers、diff 目录下可以看到，在基础镜像层上，多了init层和读写层
+
+3. 容器读写
+容器读写文件时，根据不同的情况，做出相应的策略：
+- 3.1 容器层中不存在该文件，镜像层中存在该文件
+读操作：当容器需要读取某文件，且容器层中尚不存在该文件时，则存储驱动程序将从容器层下方的镜像层自上而下开始逐层查找文件，并读取。
+
+写操作：从容器层下方的镜像层自上而下开始逐层查找文件，最后将找到的文件拷贝到容器读写层，然后将更改后的文件存储在容器层
+
+删除操作：删除容器本身的文件，文件并没有被删除，在宿主机diff目录下，相对应的容器目录中，文件以.wh.filename的形式被隐藏，当删除该隐藏文件后，容器中又可以查找到该文件
+
+例如:centos容器中有一自带文件/root/test.sh
+
+当删除该文件后，在宿主机查看对应的diff目录，有.wh.test.sh文件
+
+在宿主机上删除该隐藏文件后，容器中test.sh文件被还原
+
+- 3.2 文件同时位于容器层和镜像层
+读写操作：如果文件同时存在于容器层和镜像层，将直接从容器层进行读写。
+
+删除操作：使用3.1中方法对镜像层中要删除的文件进行标记，同时删除容器层中的文件。
+
+- 3.3 文件仅位于容器层中
+读写操作：如果该文件仅存在于容器层中，直接在容器层进行读写。
+
+删除操作：直接删除容器层中的文件。
+
+4. Aufs特点
+
+- 1.对于同一个文件的修改只需要复制一次，对同一文件的后续写入操作将对已经复制到容器的文件的副本进行操作，主要区别于devicemapper。
+
+- 2.当许多文件存在于镜像的底层，或者文件很大时将影响aufs的性能。
+
+- 3.因为是文件级存储，当修改文件时会将整个文件复制到读写层，即使只修改其中的一小部分。
+
+##### 二. Overlay2
+OverlayFS是一个官方默认并推荐的联合文件系统，类似于AUFS，但速度更快，实现更简单。Docker为OverlayFS提供了两个存储驱动程序：原始版本overlay，升级版本为overlay2。
+
+overlay在linux主机上有两层目录，镜像层和容器层，镜像层又叫lowerdir，容器层又叫upperdir, 容器内的文件系统通过一个名为merged的目录公开，该目录实际上是容器挂载点。
+
+Overlay2的读写与aufs类似，但是由于overlayfs只有两层，lowerdir和upperdir，在读取文件时可以直接从镜像层读取文件，相比aufs的逐层查找要快很多。
+
+1. 镜像层结构
+
+在/var/lib/Docker/overlay2目录下的显示，overlay只有两层，意味着多层的镜像不能实现为多个overlay层，所以每个镜像的每一层在/var/lib/Docker/overlay2都有对应的目录。
+
+目录var/lib/Docker/overlay2下存放镜像层文件和l目录，var/lib/Docker/overlay2/l存放的都是var/lib/Docker/overlay2中镜像层的软连接。
+
+查看软连接与diff同级的 lower 文件内容：
+```log
+l/BJRQBKDTPUTSNEPRT3PLWL3CXS:l/JIGVRGJJJBNV7KYFIZ27T3FWSR:l/E7IG6Q3HNVNZQSNCW3PNW6VU6M:l/P3BZFL6RJLC3NRZH7ZOPZRX7BU:l/RMQHN5EPD3Z5ESURVQ5PJPPZYR:l/E4Q4BJX22HSNZFKOOLCZOKTC3I:l/P7G4YO647WYB5RA57TBTDIGJKD:l/322XGYX54K4KCBV7DZMP2JMCWZ:l/HLJUBVY24U7W7OMC7MGI3TLY2W:l/K4OTGXYXHXECV4T7ZH6AVL7DZU:l/RTQ43MFQXIMZRGXQZUX5OQUW4Y:l/VVKMYRBI4EAK7BJPGJUQUNJEHC:l/VOQEOBTZFPJ3WFELOJBGQUH2GO:l/LCKLRCUF2BSZJIXZNOQ2NP5POO:l/OJJ5NSH5OP3GI5L3ZHHLXIU4Y2:l/77EEZUIN2UM4IQZGUK2N2YJOZ4:l/W4DVB2U33K4MGZ6T4LFH467TNR:l/KTI753NY32LLXXBKKRXZS2QGQJ:l/4LTO4AJZHZEY2AWW5JEOLDFCVF
+```
+
+Lower文件内容为lowerdir的镜像层级关系。
+
+2. 启动容器
+overlay2在linux主机上有两层目录，镜像层和容器层，镜像层又叫lowerdir，容器层又叫upperdir,统一视图通过一个名为merged的目录公开，该目录实际上是容器挂载点，路径在容器层目录下的merged目录中。
 
 ## # pod
+
