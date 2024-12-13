@@ -148,6 +148,9 @@ ls /
 这种深入到操作系统级别的运行环境一致性，打通了应用在本地开发和远端执行环境之间难以逾越的鸿沟。
 
 #### 镜像分层
+容器镜像 = 镜像层 + 容器层
+
+所有的镜像层和容器层共同构成了容器的rootfs(根目录)
 
 不过，这时你可能已经发现了另一个非常棘手的问题：难道我每开发一个应用，或者升级一下现有的应用，都要重复制作一次 rootfs 吗？
 
@@ -227,6 +230,14 @@ Overlay2的读写与aufs类似，但是由于overlayfs只有两层，lowerdir和
 
 1. 镜像层结构
 
+OverlayFS中的目录类型有：
+   1. merged：挂载点（mount point）目录，即以用户视角看到的目录。用户的实际文件操作在这里进行，即mount操作的目标目录。
+   2. lower：这一层里的文件是不会被修改的，即lower层是只读的。并且OverlayFS支持一次挂载多个lower层的目录。
+   3. upper：如果有文件的创建，修改，删除操作，这些操作的执行结果都会在这一层反映出来，即upper是可读写的。upper层内保存了所有对于目标目录的写操作内容。
+   4. work：用于存放临时文件的目录。与liunx中的/tmp目录类似。
+
+目录层级关系：lower和upper层的文件会映射到merged层中。此时如果在两个层中存在相同的文件，则在merged层中只会看到upper层的对应文件，即upper层会覆盖lower层。
+
 在/var/lib/Docker/overlay2目录下的显示，overlay只有两层，意味着多层的镜像不能实现为多个overlay层，所以每个镜像的每一层在/var/lib/Docker/overlay2都有对应的目录。
 
 目录var/lib/Docker/overlay2下存放镜像层文件和l目录，var/lib/Docker/overlay2/l存放的都是var/lib/Docker/overlay2中镜像层的软连接。
@@ -240,6 +251,410 @@ Lower文件内容为lowerdir的镜像层级关系。
 
 2. 启动容器
 overlay2在linux主机上有两层目录，镜像层和容器层，镜像层又叫lowerdir，容器层又叫upperdir,统一视图通过一个名为merged的目录公开，该目录实际上是容器挂载点，路径在容器层目录下的merged目录中。
+
+3. 容器读写
+Overlay2的读写方式和aufs类似。
+
+- 3.1 如果该文件在容器层不存在，镜像层中存在
+
+读操作：即文件不存在upperdir中，则从lowdir中读取。
+
+写操作：将文件拷贝至diff层，并写入数据。
+
+删除操作：在diff目录下对删除文件进行标记。
+
+- 3.2 文件同时位于容器层和镜像层
+读写操作：容器层upperdir会覆盖镜像层lowdir中的文件，直接在进行upperdir读写。
+
+删除操作：删除upperdir中的文件，同时在diff目录下对删除文件进行标记。
+
+- 3.3 文件仅位于容器层中
+
+文件只存在upperdir中，则直接从容器中读、写、删除文件。
+
+4. 文件操作实现原理（第三点的另一种解释）
+   1. 新建文件
+      在merged层中新建的文件会出现在upper层对应的目录中。
+   2. 删除文件，在删除文件时，OverlayFS会在所有目录层级中搜索目标文件并对其进行删除操作：
+      - 目标文件存在upper层中：文件会在upper目录中被删除。
+      - 目标文件存在lower层中：此时在lower目录里的文件不会有变化，OverlayFS会在upper目录中增加了一个特殊文件来标识该文件文件不能出现在 merged/ 里了，即表示文件已经被删除。
+    3. 修改操作，OverlayFS会对处于不同目录层级中的目标文件进行不同的修改操作：
+       - 文件存在于upper层中：此时只需直接在upper层对应的目录中修改指定文件即可。
+       - 文件存在于lower层中：那么就会在upper目录中新建一个文件，新文件中包含更新的内容。而在lower中的原文件不会改变。实际上此时是先将存在于lower层中的文件拷贝到upper层中，然后再修改upper层中的文件。（这种修改数据的方式就是 copy-on-write 写时复制。）
+    4. 读取操作
+       在查找需要读取的文件时，overlayFS会先从所有的upper层中查找所需的文件。此时overlayFS会按照这些upper层的顺序来自上而下的查找文件。如果查找到目标文件，则直接返回了否则继续向下逐层查找，直到找到文件或者查找完所有upper层。
+       如果在所有的upper层中都没有查找到文件，则会在所有的lower层中进行查找。同样,此时overlayFS会按照这些lower层的顺序来自上而下的查找文件。如果查找到目标文件，则直接返回了否则继续向下逐层查找，直到找到文件或者查找完所有lower层。
+
+5. Overlay2特性
+- overlayfs支持页缓存共享，也就是说如果多个容器访问同一个文件，可以共享同一个页缓存。
+- 但是overlayfs是文件级别的，不是块级别的，这就意味着即使文件只有很少的一点修改也要复制整个文件到容器的读写层，尤其是大文件，会导致写延迟。
+- overlay2 是所有当前支持的Linux发行版的首选存储驱动程序，无需额外配置。
+
+
+#### docker 容器启动流程
+
+1. 启用 Linux Namespace 配置。（即对容器的资源进行隔离）
+
+2. 设置指定的 Cgroups 参数。（即对容器进行资源限制配置）
+
+3. 切换进程的根目录（Change Root）。（使内核能够加载到 rootfs 中的系统数据）
+
+#### 容器数据卷(Data Volume)
+在 Docker 项目里，它支持两种 Volume 声明方式，可以把宿主机目录挂载进容器的 /test 目录当中：
+```sh
+$ docker run -v /test ...
+$ docker run -v /home:/test ...
+```
+而这两种声明方式的本质，实际上是相同的：都是把一个宿主机的目录挂载进了容器的 /test 目录。只不过，在第一种情况下，由于你并没有显示声明宿主机目录，那么 Docker 就会默认在宿主机上创建一个临时目录 /var/lib/docker/volumes/[VOLUME_ID]/_data，然后把它挂载到容器的 /test 目录上。而在第二种情况下，Docker 就直接把宿主机的 /home 目录挂载到容器的 /test 目录上。
+
+Data Volume本质上依旧是host或者host所挂载外部存储的存储空间。
+
+基于上述事实，导致Docker容器无法针对Data Volume进行容量以及权限的调整。即只能在host一侧进行调整。
+
+Data Volume的特点有以下几点：
+1. 必须是目录或者文件，不能是裸磁盘/物理设备
+2. 容器对Data Volume有读写权限
+3. 生命周期与容器独立，容器销毁后Data Volume不会跟随其一同销毁，而是永久保留数据。
+
+对于Data Volume，Docker提供了两种使用方式：bind mount和Docker managed volume。
+
+两种挂载方式实际上是利用了Linux Bind Mount机制。
+
+- Linux Bind Mount机制
+Linux Bind Mount的特点有两个：
+   - 允许将一个目录或者文件(而不是整个设备)挂载到一个指定目录(挂载点)上
+   - 在该挂载点上进行的任何操作只会发生在被挂载的目录或者文件上，而`原挂载点的内容则会被隐藏起来且不受影响。
+
+其实现原理实际上是一个 inode 替换的过程。在 Linux 操作系统中，inode用于保存文件的元数据，可以将其理解为存放文件内容的“对象”。而访问这个inode 所使用的“指针”叫目录项，即dentry。
+系统命令 ```mount --bind /home /test```，会将 /home 挂载到 /test 上。其实相当于将 /test 的 dentry的指向目标改为指向/home 的 inode。这样当修改 /test 目录时，实际修改的是 /home 目录的 inode。一旦执行 umount 命令，/test 目录原先的内容就会恢复；因为修改真正发生在的是在 /home 目录里。
+
+- bind mount
+这种方式是将host已经存在的目录mount到容器内的指定目录上，因此需要先在host上建立相应的目录或文件后才能进行mount操作并存储数据。由于其实现原理为Linux Bind Mount机制，所以使用bind mount所挂载的容器内目录会被host目录中的数据所覆盖(而非合并)。
+
+在使用细节上，一个host上的目录可以被多个容器进行bind mount。同时，bind mount还支持挂载指定的单一文件；这种操作一般适用于”只需要往容器中添加文件，而不希望覆盖整个目录”的场景。另外bind mount支持更改Data Volume的读写权限，默认是读写权限，可更改为只读权限。
+
+这种类型的Data Volume可以实现host与容器之间的数据共享以及容器间的数据共享。同时基于这些特性，bind mount可看作为是一种静态挂载的Data Volume的操作。
+
+而bind mount的缺点在于可移植性较差。因为其这种静态绑定的特性，需要在每一台host上都要按照相应的规则建立对应的目录或文件才可支持容器使用Data Volume，这会大大增加维护集群的成本。
+
+- Docker managed volume
+Docker managed volume与bind mount的唯一区别就是只需要指定容器内的挂载点即可，即Docker来负责维护挂载源。Docker会为容器在host上建立和分配相应的目录来作为挂载源，一般会建立在/var/lib/Docker/volumes/目录下。
+
+实现细节上，如果指定容器内挂载点(目录)中已经存在数据(即容器镜像内自带的数据)，此时Docker会自动将这部分数据复制到Data Volume中。其次，Docker managed volume没有实现对于目录权限的管控，因此Data Volume默认为“全放开”的读写权限。
+
+基于上述特性，Docker managed volume可以看作是一种动态挂载Data Volume的操作。
+
+而Docker managed volume方式的可移植性同样也是较差的。因为在迁移前，需要先查清Docker managed volume动态建立的哪些目录并需要手动备份这些数据。之后还需在新的host上或者是同host上中找到容器对应的新的Data Volume，并将备份的数据拷贝到新的Data Volume中。
+
+- 数据共享
+在Docker中数据共享可分为两个方面：
+   1. 容器与host的数据共享
+   2. 容器之间的数据共享
+
+容器与host的数据共享:
+   - bind mount：直接在host上针对Data Volume所对应的源数据目录进行相应的读写操作即可。
+   - Docker managed volume：需要使用到Docker cp工具或者是自行查找对应的数据源目录进行cp操作。
+
+容器之间的数据共享:
+   - bind mount：使多个容器都mount同一个host目录即可。
+   - 其次，还可使用volume container来进行数据共享。volume container实际上就是将一个或多个Data Volume提前挂载在一个容器上，并允许其他的容器与该容器共享这些volume。基于其这种特性，使得volume container能够统一管理Data Volume(因为volume都mount在它上),并且其他容器只需要与volume container进行关联，而非与相关的volume进行关联；即实现了容器与host的解耦。
+   - 另外，可使用data-packed volume container来进行数据共享。这种volume container实际上就是提前将数据都压缩到了容器镜像中。
+
+- 数据卷的生命周期管理
+   - 数据备份与恢复:
+   对于Data Volume的数据备份实际上就是针对相应的host文件系统中的指定目录进行备份。而恢复数据则就是将数据拷贝到Data Volume所对应的host文件系统中的目录内即可。
+   - 迁移
+   使新的容器在挂载Data Volume时，还保证其能够对应原有的host文件系统中的目录即可。
+   - 删除
+   bind mount: Docker在删除容器时不会删除相应的host文件目录，因此需要从host层面介入删除数据。
+   Docker managed volume：可以在删除容器时加入-v的参数，这样Docker就会自动删除相应的host文件目录了。
+
+#### docker 以及 dockerfile
+
+```py
+from flask import Flask
+import socket
+import os
+
+app = Flask(__name__)
+
+@app.route('/')
+def hello():
+    html = "<h3>Hello {name}!</h3>" \
+           "<b>Hostname:</b> {hostname}<br/>"           
+    return html.format(name=os.getenv("NAME", "world"), hostname=socket.gethostname())
+    
+if __name__ == "__main__":
+    app.run(host='0.0.0.0', port=80)
+```
+
+在这段代码中，我使用 Flask 框架启动了一个 Web 服务器，而它唯一的功能是：如果当前环境中有“NAME”这个环境变量，就把它打印在“Hello”之后，否则就打印“Hello world”，最后再打印出当前环境的 hostname。
+
+这个应用的依赖，则被定义在了同目录下的 requirements.txt 文件里，内容如下所示：
+```txt
+Flask
+```
+
+而将这样一个应用容器化的第一步，是制作容器镜像。不过，相较于之前介绍的制作 rootfs 的过程，Docker 提供了一种更便捷的方式，叫作 Dockerfile，如下所示：
+```dockerfile
+# 使用官方提供的Python开发镜像作为基础镜像
+FROM python:3.7-slim
+
+# 将工作目录切换为/app
+WORKDIR /app
+
+# 将当前目录下的所有内容复制到/app下
+ADD . /app
+
+# 使用pip命令安装这个应用所需要的依赖
+RUN pip install --trusted-host pypi.python.org -r requirements.txt
+
+# 允许外界访问容器的80端口
+EXPOSE 80
+
+# 设置环境变量
+ENV NAME PY3.7
+
+# 设置容器进程为：python app.py，即：这个Python应用的启动命令
+CMD ["python", "app.py"]
+```
+
+通过这个文件的内容，可以看到 Dockerfile 的设计思想，是使用一些标准的原语（即大写高亮的词语），描述我们所要构建的 Docker 镜像。并且这些原语，都是按顺序处理的。
+
+比如 FROM 原语，指定了“python:3.7-slim”这个官方维护的基础镜像，从而免去了安装 Python 等语言环境的操作。否则，这一段我们就得这么写了：
+```dockerfile
+FROM ubuntu:latest
+RUN apt-get update -yRUN apt-get install -y python-pip python-dev build-essential
+# ...
+```
+
+其中，RUN 原语就是在容器里执行 shell 命令的意思。
+
+而 WORKDIR，意思是在这一句之后，Dockerfile 后面的操作都以这一句指定的 /app 目录作为当前目录。
+
+所以，到了最后的 CMD，意思是 Dockerfile 指定 python app.py 为这个容器的进程。这里，app.py 的实际路径是 /app/app.py。所以，CMD ["python", "app.py"]等价于"docker run python app.py"。
+
+另外，在使用 Dockerfile 时，你可能还会看到一个叫作 ENTRYPOINT 的原语。实际上，它和 CMD 都是 Docker 容器进程启动所必需的参数，完整执行格式是：“ENTRYPOINT CMD”。
+
+但是，默认情况下，Docker 会为你提供一个隐含的 ENTRYPOINT，即：/bin/sh -c。所以，在不指定 ENTRYPOINT 时，比如在我们这个例子里，实际上运行在容器里的完整进程是：/bin/sh -c "python app.py"，即 CMD 的内容就是 ENTRYPOINT 的参数。
+
+基于以上原因，下面会统一称 Docker 容器的启动进程为 ENTRYPOINT，而不是 CMD。
+
+需要注意的是，Dockerfile 里的原语并不都是指对容器内部的操作。就比如 ADD，它指的是把当前目录（即 Dockerfile 所在的目录）里的文件，复制到指定容器内的目录当中。
+
+接下来，我就可以让 Docker 制作这个镜像了，在当前目录执行：
+```sh
+docker build -t hellopy .
+```
+
+其中，-t 的作用是给这个镜像加一个 Tag，即：起一个好听的名字。docker build 会自动加载当前目录下的 Dockerfile 文件，然后按照顺序，执行文件中的原语。而这个过程，实际上可以等同于 Docker 使用基础镜像启动了一个容器，然后在容器中依次执行 Dockerfile 中的原语。
+
+需要注意的是，Dockerfile 中的每个原语执行后，都会生成一个对应的镜像层。即使原语本身并没有明显地修改文件的操作（比如，ENV 原语），它对应的层也会存在。只不过在外界看来，这个层是空的。
+
+接下来，我使用这个镜像，通过 docker run 命令启动容器：
+```sh
+docker run -p 4000:80 hellopy
+```
+
+在这一句命令中，镜像名 hellopy 后面，我什么都不用写，因为在 Dockerfile 中已经指定了 CMD。否则，我就得把进程的启动命令加在后面：
+```sh
+docker run -p 4000:80 hellopy python app.py
+```
+
+容器启动之后，我可以使用 docker ps 命令看到运行中的容器
+
+同时，我已经通过 -p 4000:80 告诉了 Docker，请把容器内的 80 端口映射在宿主机的 4000 端口上。
+
+这样做的目的是，只要访问宿主机的 4000 端口，我就可以看到容器里应用返回的结果
+
+否则，就得先用 docker inspect 命令查看容器的 IP 地址，然后访问“http://< 容器 IP 地址 >:80”才可以看到容器内应用的返回。
+
+为了能够上传镜像，我首先需要注册一个 Docker Hub 账号（本人一般上传至阿里云的个人仓库中），然后使用 docker login 命令登录。
+
+接下来，要用 docker tag 命令给容器镜像起一个完整的名字：
+
+```sh
+docker tag hellopy ipso/hellopy:v1
+```
+
+其中，ipso 是我在 Docker Hub 上的用户名，它的“学名”叫镜像仓库（Repository）；“/”后面的 hellopy 是这个镜像的名字，而“v1”则是我给这个镜像分配的版本号。
+
+这样，我就可以把这个镜像上传到 Docker Hub 上了。
+
+**此外，我还可以使用 docker commit 指令，把一个正在运行的容器，直接提交为一个镜像。一般来说，需要这么操作原因是：这个容器运行起来后，我又在里面做了一些操作，并且要把操作结果保存到镜像里，比如：**
+```sh
+$ docker exec -it 4ddf4638572c /bin/sh
+# 在容器内部新建了一个文件
+root@4ddf4638572d:/app# touch test.txt
+root@4ddf4638572d:/app# exit
+
+#将这个新建的文件提交到镜像中保存
+$ docker commit 4ddf4638572c ipso/hellopy:v2
+```
+
+这里，我使用了 docker exec 命令进入到了容器当中。在了解了 Linux Namespace 的隔离机制后，你应该会很自然地想到一个问题：docker exec 是怎么做到进入容器里的呢？
+
+实际上，Linux Namespace 创建的隔离空间虽然看不见摸不着，但一个进程的 Namespace 信息在宿主机上是确确实实存在的，并且是以一个文件的方式存在。
+
+比如，通过如下指令，你可以看到当前正在运行的 Docker 容器的进程号（PID）是 2290900
+```sh
+$ docker inspect --format '{{ .State.Pid }}' 4ddf4638572c
+2290900
+```
+
+这时，你可以通过查看宿主机的 proc 文件，看到这个 2290900 进程的所有 Namespace 对应的文件：
+```sh
+[root@ttt ~]# ls -l /proc/2290900/ns
+total 0
+lrwxrwxrwx 1 root root 0 Dec 13 16:17 cgroup -> 'cgroup:[4026532678]'
+lrwxrwxrwx 1 root root 0 Dec 13 16:17 ipc -> 'ipc:[4026532621]'
+lrwxrwxrwx 1 root root 0 Dec 13 16:17 mnt -> 'mnt:[4026532619]'
+lrwxrwxrwx 1 root root 0 Oct 17 14:34 net -> 'net:[4026532623]'
+lrwxrwxrwx 1 root root 0 Dec 13 16:17 pid -> 'pid:[4026532622]'
+lrwxrwxrwx 1 root root 0 Dec 13 16:17 pid_for_children -> 'pid:[4026532622]'  
+lrwxrwxrwx 1 root root 0 Dec 13 16:17 time -> 'time:[4026531834]'
+lrwxrwxrwx 1 root root 0 Dec 13 16:17 time_for_children -> 'time:[4026531834]'
+lrwxrwxrwx 1 root root 0 Dec 13 16:17 user -> 'user:[4026531837]'
+lrwxrwxrwx 1 root root 0 Dec 13 16:17 uts -> 'uts:[4026532620]'
+```
+
+可以看到，一个进程的每种 Linux Namespace，都在它对应的 /proc/[进程号]/ns 下有一个对应的虚拟文件，并且链接到一个真实的 Namespace 文件上。
+
+有了这样一个可以“hold 住”所有 Linux Namespace 的文件，我们就可以对 Namespace 做一些很有意义事情了，比如：加入到一个已经存在的 Namespace 当中。
+
+**这也就意味着：一个进程，可以选择加入到某个进程已有的 Namespace 当中，从而达到“进入”这个进程所在容器的目的，这正是 docker exec 的实现原理。**
+
+而这个操作所依赖的，乃是一个名叫 setns() 的 Linux 系统调用
+```c
+#define _GNU_SOURCE
+#include <fcntl.h>
+#include <sched.h>
+#include <unistd.h>
+#include <stdlib.h>
+#include <stdio.h>
+
+#define errExit(msg) do { perror(msg); exit(EXIT_FAILURE);} while (0)
+
+int main(int argc, char *argv[]) {
+    int fd;
+    
+    fd = open(argv[1], O_RDONLY);
+    if (setns(fd, 0) == -1) {
+        errExit("setns");
+    }
+    execvp(argv[2], &argv[2]); 
+    errExit("execvp");
+}
+```
+
+上面代码，请使用 golang 实现
+
+这段代码功能非常简单：它一共接收两个参数，第一个参数是 argv[1]，即当前进程要加入的 Namespace 文件的路径，比如 /proc/25686/ns/net；而第二个参数，则是你要在这个 Namespace 里运行的进程，比如 /bin/bash。
+
+这段代码的核心操作，则是通过 open() 系统调用打开了指定的 Namespace 文件，并把这个文件的描述符 fd 交给 setns() 使用。在 setns() 执行后，当前进程就加入了这个文件对应的 Linux Namespace 当中了。
+
+上面代码使用 golang 实现：
+```go
+package main
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"syscall"
+
+	"golang.org/x/sys/unix"
+)
+
+func main() {
+	if len(os.Args) < 3 {
+		fmt.Fprintln(os.Stderr, "Usage: <program> <namespace-file> <command> [args...]")
+		os.Exit(1)
+	}
+
+	// 打开命名空间文件
+	fd, err := os.OpenFile(os.Args[1], os.O_RDONLY, 0)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error opening namespace file: %v\n", err)
+		os.Exit(1)
+	}
+	defer fd.Close()
+
+	// 调用 setns 系统调用加入命名空间
+	if err := unix.Setns(int(fd.Fd()), unix.CLONE_NEWNS); err != nil {
+		fmt.Fprintf(os.Stderr, "Error calling setns: %v\n", err)
+		os.Exit(1)
+	}
+
+	// 执行新的程序
+	cmd := exec.Command(os.Args[2], os.Args[3:]...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error executing command: %v\n", err)
+		os.Exit(1)
+	}
+}
+```
+
+- 提交镜像的操作 docker commit 上来吧
+docker commit，实际上就是在容器运行起来后，把最上层的“可读写层”，加上原先容器镜像的只读层，打包组成了一个新的镜像。当然，下面这些只读层在宿主机上是共享的，不会占用额外的空间。
+
+而由于使用了联合文件系统，你在容器里对镜像 rootfs 所做的任何修改，都会被操作系统先复制到这个可读写层，然后再修改。这就是所谓的：Copy-on-Write。
+
+而正如前所说，Init 层的存在，就是为了避免你执行 docker commit 时，把 Docker 自己对 /etc/hosts 等文件做的修改，也一起提交掉。
+
+
+## # 从容器到容器云：理解 Kubernetes 的本质
+
+#### 首先，Kubernetes 项目要解决的问题是什么？
+编排？调度？容器云？还是集群管理？
+
+实际上，这个问题到目前为止都没有固定的答案。因为在不同的发展阶段，Kubernetes 需要着重解决的问题是不同的。
+
+但是，对于大多数用户来说，他们希望 Kubernetes 项目带来的体验是确定的：现在我有了应用的容器镜像，请帮我在一个给定的集群上把这个应用运行起来。
+
+更进一步地说，我还希望 Kubernetes 能给我提供路由网关、水平扩展、监控、备份、灾难恢复等一系列运维能力。
+
+等一下，这些功能听起来好像有些耳熟？这不就是经典 PaaS（比如，Cloud Foundry）项目的能力吗？
+
+而且，有了 Docker 之后，我根本不需要什么 Kubernetes、PaaS，只要使用 Docker 公司的 Compose+Swarm 项目，就完全可以很方便地 DIY 出这些功能了！
+
+所以说，如果 Kubernetes 项目只是停留在拉取用户镜像、运行容器，以及提供常见的运维功能的话，那么别说跟“原生”的 Docker Swarm 项目竞争了，哪怕跟经典的 PaaS 项目相比也难有什么优势可言。
+
+而实际上，在定义核心功能的过程中，Kubernetes 项目正是依托着 Borg 项目的理论优势，才在短短几个月内迅速站稳了脚跟。
+
+Kubernetes 项目的架构，跟它的原型项目 Borg 非常类似，都由 Master 和 Node 两种节点组成，而这两种角色分别对应着控制节点和计算节点。
+
+其中，控制节点，即 Master 节点，由三个紧密协作的独立组件组合而成，它们分别是负责 API 服务的 kube-apiserver、负责调度的 kube-scheduler，以及负责容器编排的 kube-controller-manager。整个集群的持久化数据，则由 kube-apiserver 处理后保存在 Etcd 中。
+
+而计算节点上最核心的部分，则是一个叫作 kubelet 的组件。
+
+在 Kubernetes 项目中，kubelet 主要负责同容器运行时（比如 Docker 项目）打交道。而这个交互所依赖的，是一个称作 CRI（Container Runtime Interface）的远程调用接口，这个接口定义了容器运行时的各项核心操作，比如：启动一个容器需要的所有参数。
+
+这也是为何，Kubernetes 项目并不关心你部署的是什么容器运行时、使用的什么技术实现，只要你的这个容器运行时能够运行标准的容器镜像，它就可以通过实现 CRI 接入到 Kubernetes 项目当中。
+
+而具体的容器运行时，比如 Docker 项目，则一般通过 OCI 这个容器运行时规范同底层的 Linux 操作系统进行交互，即：把 CRI 请求翻译成对 Linux 操作系统的调用（操作 Linux Namespace 和 Cgroups 等）。
+
+此外，kubelet 还通过 gRPC 协议同一个叫作 Device Plugin 的插件进行交互。这个插件，是 Kubernetes 项目用来管理 GPU 等宿主机物理设备的主要组件，也是基于 Kubernetes 项目进行机器学习训练、高性能作业支持等工作必须关注的功能。
+
+而 kubelet 的另一个重要功能，则是调用网络插件和存储插件为容器配置网络和持久化存储。这两个插件与 kubelet 进行交互的接口，分别是 CNI（Container Networking Interface）和 CSI（Container Storage Interface）。
+
+实际上，kubelet 这个奇怪的名字，来自于 Borg 项目里的同源组件 Borglet。不过，如果你浏览过 Borg 论文的话，就会发现，这个命名方式可能是 kubelet 组件与 Borglet 组件的唯一相似之处。因为 Borg 项目，并不支持我们这里所讲的容器技术，而只是简单地使用了 Linux Cgroups 对进程进行限制。这就意味着，像 Docker 这样的“容器镜像”在 Borg 中是不存在的，Borglet 组件也自然不需要像 kubelet 这样考虑如何同 Docker 进行交互、如何对容器镜像进行管理的问题，也不需要支持 CRI、CNI、CSI 等诸多容器技术接口。
+
+可以说，kubelet 完全就是为了实现 Kubernetes 项目对容器的管理能力而重新实现的一个组件，与 Borg 之间并没有直接的传承关系。
+
+那么，Borg 对于 Kubernetes 项目的指导作用又体现在哪里呢？
+
+答案是，Master 节点。虽然在 Master 节点的实现细节上 Borg 项目与 Kubernetes 项目不尽相同，但它们的出发点却高度一致，即：如何编排、管理、调度用户提交的作业？
+
+所以，Borg 项目完全可以把 Docker 镜像看作一种新的应用打包方式。这样，Borg 团队过去在大规模作业管理与编排上的经验就可以直接“套”在 Kubernetes 项目上了。
+
+这些经验最主要的表现就是，从一开始，Kubernetes 项目就没有像同时期的各种“容器云”项目那样，把 Docker 作为整个架构的核心，而仅仅把它作为最底层的一个容器运行时实现。（太高明的设计。不要依赖细节，要依赖抽象）
+
+而 Kubernetes 项目要着重解决的问题，则来自于 Borg 的研究人员在论文中提到的一个非常重要的观点：运行在大规模集群中的各种任务之间，实际上存在着各种各样的关系。这些关系的处理，才是作业编排和管理系统最困难的地方。
+
 
 ## # pod
 
