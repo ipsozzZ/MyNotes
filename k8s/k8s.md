@@ -1288,7 +1288,7 @@ Pod 的这些状态信息，是我们判断应用运行情况的重要标准，�
 2. ConfigMap；
 3. Downward API；
 4. ServiceAccountToken。
-5. ServiceAccountToken。
+5. clusterTrustBundle
 
 #### Secret
 它的作用，是帮你把 Pod 想要访问的加密数据，存放到 Etcd 中。然后，你就可以通过在 Pod 的容器里挂载 Volume 的方式，访问到这些 Secret 里保存的信息了。
@@ -1588,4 +1588,233 @@ Pod 的字段这么多，我又不可能全记住，Kubernetes 能不能自动�
 这个需求实际上非常实用。比如，开发人员只需要提交一个基本的、非常简单的 Pod YAML，Kubernetes 就可以自动给对应的 Pod 对象加上其他必要的信息，比如 labels，annotations，volumes 等等。而这些信息，可以是运维人员事先定义好的。这就是 PodPreset （v1.11 版本开始，1.20后已经去掉这个功能了）
 
 
+#### clusterTrustBundle 投射卷
+要在 Kubernetes 1.32 中使用此特性，你必须通过 ClusterTrustBundle 特性门控和 --runtime-config=certificates.k8s.io/v1alpha1/clustertrustbundles=true kube-apiserver 标志启用对 ClusterTrustBundle 对象的支持，然后才能启用 ClusterTrustBundleProjection 特性门控。
+
+clusterTrustBundle 投射卷源将一个或多个 ClusterTrustBundle 对象的内容作为一个自动更新的文件注入到容器文件系统中。
+
+
 ## # 编排其实很简单：谈谈“控制器”模型
+实际上，你可能已经有所感悟：Pod 这个看似复杂的 API 对象，实际上就是对容器的进一步抽象和封装而已。
+
+所以，Pod 对象，其实就是容器的升级版。它对容器进行了组合，添加了更多的属性和字段。这就好比给集装箱四面安装了吊环，使得 Kubernetes 这架“吊车”，可以更轻松地操作它。
+
+而 Kubernetes 操作这些“集装箱”的逻辑，都由控制器（Controller）完成。在上面我们曾经使用过 Deployment 这个最基本的控制器对象：
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-deployment
+spec:
+  selector:
+    matchLabels:
+      app: nginx
+  replicas: 2
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:latest
+        ports:
+        - containerPort: 80
+```
+这个 Deployment 定义的编排动作非常简单，即：确保携带了 app=nginx 标签的 Pod 的个数，永远等于 spec.replicas 指定的个数，即 2 个。
+
+这就意味着，如果在这个集群中，携带 app=nginx 标签的 Pod 的个数大于 2 的时候，就会有旧的 Pod 被删除；反之，就会有新的 Pod 被创建。
+
+究竟是 Kubernetes 项目中的哪个组件，在执行这些操作呢？
+
+在前面介绍 Kubernetes 架构的时候，曾经提到过一个叫作 kube-controller-manager 的组件。
+
+实际上，这个组件，就是一系列控制器的集合。我们可以查看一下 Kubernetes 项目的 pkg/controller 目录：(https://github.com/kubernetes/kubernetes/tree/master/pkg/controller)
+```sh
+$ cd kubernetes/pkg/controller/
+$ ls -d */              
+deployment/             job/                    podautoscaler/          
+cloud/                  disruption/             namespace/              
+replicaset/             serviceaccount/         volume/
+cronjob/                garbagecollector/       nodelifecycle/          replication/            statefulset/            daemon/
+# ...
+```
+
+这个目录下面的每一个控制器，都以独有的方式负责某种编排功能。而我们的 Deployment，正是这些控制器中的一种。
+
+实际上，这些控制器之所以被统一放在 pkg/controller 目录下，就是因为它们都遵循 Kubernetes 项目中的一个通用编排模式，即：控制循环（control loop）。（循环对比实际状态和期望状态，然后执行某种动作以达到期望状态）
+
+比如，现在有一种待编排的对象 X，它有一个对应的控制器。那么，我就可以用一段 Go 语言风格的伪代码，为你描述这个控制循环：
+```go
+for {
+  实际状态 := 获取集群中对象X的实际状态（Actual State）
+  期望状态 := 获取集群中对象X的期望状态（Desired State）
+  if 实际状态 == 期望状态{
+    什么都不做
+  } else {
+    执行编排动作，将实际状态调整为期望状态
+  }
+}
+```
+
+在具体实现中，实际状态往往来自于 Kubernetes 集群本身。
+
+比如，kubelet 通过心跳汇报的容器状态和节点状态，或者监控系统中保存的应用监控数据，或者控制器主动收集的它自己感兴趣的信息，这些都是常见的实际状态的来源。
+
+而期望状态，一般来自于用户提交的 YAML 文件。
+
+比如，Deployment 对象中 Replicas 字段的值。很明显，这些信息往往都保存在 Etcd 中。
+
+接下来，以 Deployment 为例，简单描述一下它对控制器模型的实现：
+1. Deployment 控制器从 Etcd 中获取到所有携带了“app: nginx”标签的 Pod，然后统计它们的数量，这就是实际状态；
+2. Deployment 对象的 Replicas 字段的值就是期望状态；
+3. Deployment 控制器将两个状态做比较，然后根据比较结果，确定是创建 Pod，还是删除已有的 Pod（具体如何操作 Pod 对象，参考下面作业副本与水平扩展部分）。
+
+可以看到，一个 Kubernetes 对象的主要编排逻辑，实际上是在第三步的“对比”阶段完成的。
+
+这个操作，通常被叫作调谐（Reconcile）。这个调谐的过程，则被称作“Reconcile Loop”（调谐循环）或者“Sync Loop”（同步循环），所以，如果你以后在文档或者社区中碰到这些词，都不要担心，它们其实指的都是同一个东西：控制循环。
+
+而调谐的最终结果，往往都是对被控制对象的某种写操作。
+
+比如，增加 Pod，删除已有的 Pod，或者更新 Pod 的某个字段。这也是 Kubernetes 项目“面向 API 对象编程”的一个直观体现。
+
+其实，像 Deployment 这种控制器的设计原理，就是我们前面提到过的，“用一种对象管理另一种对象”的“艺术”。
+
+其中，这个控制器对象本身，负责定义被管理对象的期望状态。比如，Deployment 里的 replicas=2 这个字段。
+
+而被控制对象的定义，则来自于一个“模板”。比如，Deployment 里的 template 字段。
+
+可以看到，Deployment 这个 template 字段里的内容，跟一个标准的 Pod 对象的 API 定义，丝毫不差。而所有被这个 Deployment 管理的 Pod 实例，其实都是根据这个 template 字段的内容创建出来的。
+
+像 Deployment 定义的 template 字段，在 Kubernetes 项目中有一个专有的名字，叫作 PodTemplate（Pod 模板）。
+
+这个概念非常重要，因为后面我要讲解到的大多数控制器，都会使用 PodTemplate 来统一定义它所要管理的 Pod。更有意思的是，我们还会看到其他类型的对象模板，比如 Volume 的模板。
+
+类似 Deployment 这样的一个控制器，实际上都是由上半部分的控制器定义（包括期望状态），加上 template 下半部分的被控制对象的模板组成的。
+
+这就是为什么，在所有 API 对象的 Metadata 里，都有一个字段叫作 ownerReference，用于保存当前这个 API 对象的拥有者（Owner）的信息。
+
+那么，对于我们这个 nginx-deployment 来说，它创建出来的 Pod 的 ownerReference 就是 nginx-deployment 吗？或者说，nginx-deployment 所直接控制的，就是 Pod 对象么？（不是，是replica set）
+
+
+## # 作业副本与水平扩展
+上面详细介绍了 Kubernetes 项目中第一个重要的设计思想：控制器模式。而现在就详细了解一下，Kubernetes 里第一个控制器模式的完整实现：Deployment。
+
+Deployment 看似简单，但实际上，它实现了 Kubernetes 项目中一个非常重要的功能：Pod 的“水平扩展 / 收缩”（horizontal scaling out/in）。这个功能，是从 PaaS 时代开始，一个平台级项目就必须具备的编排能力。
+
+举个例子，如果你更新了 Deployment 的 Pod 模板（比如，修改了容器的镜像），那么 Deployment 就需要遵循一种叫作“滚动更新”（rolling update）的方式，来升级现有的容器。
+
+而这个能力的实现，依赖的是 Kubernetes 项目中的一个非常重要的概念（API 对象）：ReplicaSet。
+
+ReplicaSet 的结构非常简单，我们可以通过这个 YAML 文件查看一下：
+```yaml
+apiVersion: apps/v1
+kind: ReplicaSet
+metadata:
+  name: nginx-set
+  labels:
+    app: nginx
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:latest
+```
+
+从这个 YAML 文件中，我们可以看到，一个 ReplicaSet 对象，其实就是由副本数目的定义和一个 Pod 模板组成的。不难发现，它的定义其实是 Deployment 的一个子集。
+
+**更重要的是，Deployment 控制器实际操纵的，正是这样的 ReplicaSet 对象，而不是 Pod 对象。**
+
+
+```md
+ReplicaSet是Kubernetes中的一种资源对象（也是控制器），用于定义和管理Pod副本的集合。它确保指定数量的Pod副本在任何时候都在运行，并在Pod生故障或被删除时自动进行替换。
+
+ReplicaSet使用标签器来确定要管理的Pod副本。它可以根据指定的标签选择器创建、删除和调整Pod副本的数量，以保持期望的副本数量。
+
+当创建一个ReplicaSet时，您需要指定以下几个重要的属性：
+
+selector：用于选择要管理的Pod副本的标签选择器。
+replicas：指定要创建的Pod副本的数量。
+template：定义要创建的Pod副本的模板。
+ReplicaSet的工作原理是通过持续监控集群中的Pod副本数量，并根据需要创建或删除副本来维持期望的状态。如果有副本数量少于期望数量，ReplicaSet将创建新的副本来替补；如果有副本数量多于期望数量，ReplicaSet将删除多余的副本。
+
+请注意，ReplicaSet本身并不支持水平扩展或滚动更新，它只负责维护指定数量的Pod副本。如果您需要进行水平扩展或滚动更新，可以使用Deployment对象，它是在ReplicaSet之上的一个更高级别的抽象。
+```
+
+明白了这个原理，再来分析一个如下所示的 Deployment：
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-deployment
+  labels:
+    app: nginx
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:latest
+        ports:
+        - containerPort: 80
+```
+可以看到，这就是一个我们常用的 nginx-deployment，它定义的 Pod 副本个数是 3（spec.replicas=3）。
+
+那么，在具体的实现上，这个 Deployment，与 ReplicaSet，以及 Pod 的关系是怎样的呢？
+
+一个定义了 replicas=3 的 Deployment，与它的 ReplicaSet，以及 Pod 的关系，实际上是一种“层层控制”的关系。
+
+其中，ReplicaSet 负责通过“控制器模式”，保证系统中 Pod 的个数永远等于指定的个数（比如，3 个）。这也正是 Deployment 只允许容器的 restartPolicy=Always 的主要原因：只有在容器能保证自己始终是 Running 状态的前提下，ReplicaSet 调整 Pod 的个数才有意义。
+
+而在此基础上，Deployment 同样通过“控制器模式”，来操作 ReplicaSet 的个数和属性，进而实现“水平扩展 / 收缩”和“滚动更新”这两个编排动作。
+
+其中，“水平扩展 / 收缩”非常容易实现，Deployment Controller 只需要修改它所控制的 ReplicaSet 的 Pod 副本个数就可以了。
+
+比如，把这个值从 3 改成 4，那么 Deployment 所对应的 ReplicaSet，就会根据修改后的值自动创建一个新的 Pod。这就是“水平扩展”了；“水平收缩”则反之。
+
+而用户想要执行这个操作的指令也非常简单，就是 kubectl scale，比如：
+```sh
+$ kubectl scale deployment nginx-deployment --replicas=4
+deployment.apps/nginx-deployment scaled
+```
+
+那么，“滚动更新”又是什么意思，是如何实现的呢？
+
+接下来，以这个 Deployment 为例，来为你讲解“滚动更新”的过程。
+
+首先，我们来创建这个 nginx-deployment：
+```sh
+$ kubectl create -f nginx-deployment.yaml --record
+```
+注意，在这里，我额外加了一个–record 参数。它的作用，是记录下你每次操作所执行的命令，以方便后面查看。
+
+然后，我们来检查一下 nginx-deployment 创建后的状态信息：
+```sh
+$ kubectl get deployments
+NAME               DESIRED   CURRENT   UP-TO-DATE   AVAILABLE   AGE
+nginx-deployment   3         0         0            0           1s
+```
+
+在返回结果中，我们可以看到四个状态字段，它们的含义如下:
+1. DESIRED：用户期望的 Pod 副本个数（spec.replicas 的值）；
+2. CURRENT：当前处于 Running 状态的 Pod 的个数；
+3. UP-TO-DATE：当前处于最新版本的 Pod 的个数，所谓最新版本指的是 Pod 的 Spec 部分与 Deployment 里 Pod 模板里定义的完全一致；
+4. AVAILABLE：当前已经可用的 Pod 的个数，即：既是 Running 状态，又是最新版本，并且已经处于 Ready（健康检查正确）状态的 Pod 的个数。
+
+可以看到，只有这个 AVAILABLE 字段，描述的才是用户所期望的最终状态。
+
