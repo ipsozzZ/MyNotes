@@ -1,0 +1,16 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: testpi
+spec:
+  completions: 4
+  parallelism: 2
+  template:
+    spec:
+      containers:
+      - name: testpi
+        image: perl:5.34.0
+        command: ["perl",  "-Mbignum=bpi", "-wle", "print bpi(100)"]
+      restartPolicy: Never
+  backoffLimit: 4
+
