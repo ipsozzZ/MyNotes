@@ -3,9 +3,9 @@ import pymysql
  
 # 连接MySQL数据库的配置
 mysql_config = {
-    'host': 'node02.ipso.live',
+    'host': '127.0.0.1',
     'user': 'root',
-    'password': 'Py481632',
+    'password': 'pass',
     'database': 'gtool'
 }
  
