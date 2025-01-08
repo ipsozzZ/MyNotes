@@ -3577,3 +3577,446 @@ hello     */1 * * * *   False     0         Thu, 6 Sep 2018 14:34:00 -070
 
 
 ## # 声明式API与Kubernetes编程范式
+在使用 kubectl create 创建api对象，再使用 kubectl set image 和 kubectl edit 命令更新api对象，或者 kubectl replace -f 的操作，我们称为命令式配置文件操作。
+也就是说，它的处理方式，其实跟前面 Docker Swarm 的两句命令，没什么本质上的区别。只不过，它是把 Docker 命令行里的参数，写在了配置文件里而已。
+
+那么，到底什么才是“声明式 API”呢？
+
+答案是，kubectl apply 命令。
+
+现在，我就使用 kubectl apply 命令来创建这个 Deployment：
+```sh
+$ kubectl apply -f nginx.yaml
+```
+这样，Nginx 的 Deployment 就被创建了出来，这看起来跟 kubectl create 的效果一样。
+
+然后，我再修改一下 nginx.yaml 里定义的镜像，这时候，关键来了。
+
+在修改完这个 YAML 文件之后，我不再使用 kubectl replace 命令进行更新，而是继续执行一条 kubectl apply 命令，即：
+```sh
+$ kubectl apply -f nginx.yaml
+```
+这时，Kubernetes 就会立即触发这个 Deployment 的“滚动更新”。
+
+可是，它跟 kubectl replace 命令有什么本质区别吗？
+
+**实际上，你可以简单地理解为，kubectl replace 的执行过程，是使用新的 YAML 文件中的 API 对象，替换原有的 API 对象；而 kubectl apply，则是执行了一个对原有 API 对象的 PATCH 操作。（类似地，kubectl set image 和 kubectl edit 也是对已有 API 对象的修改。）**
+
+更进一步地，这意味着 kube-apiserver 在响应命令式请求（比如，kubectl replace）的时候，一次只能处理一个写请求，否则会有产生冲突的可能。而对于声明式请求（比如，kubectl apply），一次能处理多个写操作，并且具备 Merge 能力。
+
+**kubectl create、kubectl replace命令行提交后会用本地YAML文件定义的API对象替换原有API对象，这个替换过程就是一条HTTP事务，API对象被替换后，下一条HTTP事务处理的就是新的对象，对象替换过程触发数据库写锁，所以一次只能处理一个请求。而kubectl apply则是以PATCH补丁方式在线修改API对象的多个元素，因此能并行处理多路请求，只要不同时修改同一对象的同一元素就不会产生写冲突。**
+
+这种区别，可能乍一听起来没那么重要。而且，正是由于要照顾到这样的 API 设计，做同样一件事情，Kubernetes 需要的步骤往往要比其他项目多不少。
+
+但是，如果你仔细思考一下 Kubernetes 项目的工作流程，就不难体会到这种声明式 API 的独到之处。
+
+#### istio 例子
+
+（Istio 效果：在用户提交的yaml文件中加入实现定义好的 Envoy 容器，以接管 Pod 进出流量 Istio 过程： 1.将这个 Envoy 容器本身的定义，以 ConfigMap 的方式保存在 Kubernetes 当中； 2.编写“自定义控制器”（Custom Controller）| Initializer； 3.将编写好的Initializer作为 Pod 部署； 4.编写 InitializerConfiguration ，指定 Initializer，并且在新Pod创建时添加 metadata.initializers.pending 标志； 5.Initializer 通过 Kubernetes 的“控制循环”机制，遍历获取新创建的符合筛选条件（metadata.initializers.pending）的 Pod，检查期望状态（Pod里添加了Envoy容器的定义）与实际状态 ，修改该Pod的API对象，然后清除metadata.initializers.pending 标志。 Initializer 过程： 1.从APIServer中拿到ConfigMap，将其中containers与volumes字段添加进空Pod对象； 2.调用 Kubernetes API库 strategicpatch.CreateTwoWayMergePatch(pod, newPod)，生成新旧Pod对象的TwoWayMergePatch ； 3.调用 Kubernetes 的 Client，以TwoWayMergePatch 为参数发起一个 PATCH 请求，用户提交的Pod里添加了ConfigMap中的Envoy容器相关字段。）
+
+在 2017 年 5 月，Google、IBM 和 Lyft 公司，共同宣布了 Istio 开源项目的诞生。很快，这个项目就在技术圈儿里，掀起了一阵名叫“微服务”的热潮，把 Service Mesh 这个新的编排概念推到了风口浪尖。而 Istio 项目，实际上就是一个基于 Kubernetes 项目的微服务治理框架。主要由 Control Plane 控制层和运行在每一个应用 Pod 里的 Envoy 容器组成。
+
+Istio 最根本的组件，是运行在每一个应用 Pod 里的 Envoy 容器。这个 Envoy 项目是 Lyft 公司推出的一个高性能 C++ 网络代理，也是 Lyft 公司对 Istio 项目的唯一贡献。
+
+而 Istio 项目，则把这个代理服务以 sidecar 容器的方式，运行在了每一个被治理的应用 Pod 中。我们知道，Pod 里的所有容器都共享同一个 Network Namespace。所以，Envoy 容器就能够通过配置 Pod 里的 iptables 规则，把整个 Pod 的进出流量接管下来。
+
+这时候，Istio 的控制层（Control Plane）里的 Pilot 组件，就能够通过调用每个 Envoy 容器的 API，对这个 Envoy 代理进行配置，从而实现微服务治理。
+
+来看一个例子。
+
+假设k8s环境中 PodA 是已经在运行的应用，而 PodB 则是我们刚刚上线的应用的新版本。这时候，Pilot 通过调节这两 Pod 里的 Envoy 容器的配置，从而将 90% 的流量分配给旧版本的应用，将 10% 的流量分配给新版本应用，并且，还可以在后续的过程中随时调整。这样，一个典型的“灰度发布”的场景就完成了。比如，Istio 可以调节这个流量从 90%-10%，改到 80%-20%，再到 50%-50%，最后到 0%-100%，就完成了这个灰度发布的过程。
+
+更重要的是，在整个微服务治理的过程中，无论是对 Envoy 容器的部署，还是像上面这样对 Envoy 代理的配置，用户和应用都是完全“无感”的。
+
+这时候，你可能会有所疑惑：Istio 项目明明需要在每个 Pod 里安装一个 Envoy 容器，又怎么能做到“无感”的呢？
+
+实际上，Istio 项目使用的，是 Kubernetes 中的一个非常重要的功能，叫作 Dynamic Admission Control。
+
+在 Kubernetes 项目中，当一个 Pod 或者任何一个 API 对象被提交给 APIServer 之后，总有一些“初始化”性质的工作需要在它们被 Kubernetes 项目正式处理之前进行。比如，自动为所有 Pod 加上某些标签（Labels）。
+
+而这个“初始化”操作的实现，借助的是一个叫作 Admission 的功能。它其实是 Kubernetes 项目里一组被称为 Admission Controller 的代码，可以选择性地被编译进 APIServer 中，在 API 对象创建之后会被立刻调用到。
+
+但这就意味着，如果你现在想要添加一些自己的规则到 Admission Controller，就会比较困难。因为，这要求重新编译并重启 APIServer。显然，这种使用方法对 Istio 来说，影响太大了。
+
+所以，Kubernetes 项目为我们额外提供了一种“热插拔”式的 Admission 机制，它就是 Dynamic Admission Control，也叫作：Initializer。
+
+比如，我有如下所示的一个应用 Pod：
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: myapp-pod
+  labels:
+    app: myapp
+spec:
+  containers:
+  - name: myapp-container
+    image: busybox
+    command: ['sh', '-c', 'echo Hello Kubernetes! && sleep 3600']
+```
+可以看到，这个 Pod 里面只有一个用户容器，叫作：myapp-container。
+
+接下来，Istio 项目要做的，就是在这个 Pod YAML 被提交给 Kubernetes 之后，在它对应的 API 对象里自动加上 Envoy 容器的配置，使这个对象变成如下所示的样子：
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: myapp-pod
+  labels:
+    app: myapp
+spec:
+  containers:
+  - name: myapp-container
+    image: busybox
+    command: ['sh', '-c', 'echo Hello Kubernetes! && sleep 3600']
+  - name: envoy
+    image: lyft/envoy:845747b88f102c0fd262ab234308e9e22f693a1
+    command: ["/usr/local/bin/envoy"]
+    ...
+```
+可以看到，被 Istio 处理后的这个 Pod 里，除了用户自己定义的 myapp-container 容器之外，多出了一个叫作 envoy 的容器，它就是 Istio 要使用的 Envoy 代理。
+
+那么，Istio 又是如何在用户完全不知情的前提下完成这个操作的呢？
+
+Istio 要做的，就是编写一个用来为 Pod“自动注入”Envoy 容器的 Initializer。
+
+首先，Istio 会将这个 Envoy 容器本身的定义，以 ConfigMap 的方式保存在 Kubernetes 当中。这个 ConfigMap（名叫：envoy-initializer）的定义如下所示：
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: envoy-initializer
+data:
+  config: |
+    containers:
+      - name: envoy
+        image: lyft/envoy:845747db88f102c0fd262ab234308e9e22f693a1
+        command: ["/usr/local/bin/envoy"]
+        args:
+          - "--concurrency 4"
+          - "--config-path /etc/envoy/envoy.json"
+          - "--mode serve"
+        ports:
+          - containerPort: 80
+            protocol: TCP
+        resources:
+          limits:
+            cpu: "1000m"
+            memory: "512Mi"
+          requests:
+            cpu: "100m"
+            memory: "64Mi"
+        volumeMounts:
+          - name: envoy-conf
+            mountPath: /etc/envoy
+    volumes:
+      - name: envoy-conf
+        configMap:
+          name: envoy
+```
+
+相信你已经注意到了，这个 ConfigMap 的 data 部分，正是一个 Pod 对象的一部分定义。其中，我们可以看到 Envoy 容器对应的 containers 字段，以及一个用来声明 Envoy 配置文件的 volumes 字段。
+
+不难想到，Initializer 要做的工作，就是把这部分 Envoy 相关的字段，自动添加到用户提交的 Pod 的 API 对象里。可是，用户提交的 Pod 里本来就有 containers 字段和 volumes 字段，所以 Kubernetes 在处理这样的更新请求时，就必须使用类似于 git merge 这样的操作，才能将这两部分内容合并在一起。
+
+所以说，在 Initializer 更新用户的 Pod 对象的时候，必须使用 PATCH API 来完成。而这种 PATCH API，正是声明式 API 最主要的能力。
+
+接下来，Istio 将一个编写好的 Initializer，作为一个 Pod 部署在 Kubernetes 中。这个 Pod 的定义非常简单，如下所示：
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    app: envoy-initializer
+  name: envoy-initializer
+spec:
+  containers:
+    - name: envoy-initializer
+      image: envoy-initializer:0.0.1
+      imagePullPolicy: Always
+```
+
+我们可以看到，这个 envoy-initializer 使用的 envoy-initializer:0.0.1 镜像，就是一个事先编写好的“自定义控制器”（Custom Controller），我将会在下面描述它的编写方法。而在这里，我要先为你解释一下这个控制器的主要功能。
+
+一个 Kubernetes 的控制器，实际上就是一个“死循环”：它不断地获取“实际状态”，然后与“期望状态”作对比，并以此为依据决定下一步的操作。
+
+而 Initializer 的控制器，不断获取到的“实际状态”，就是用户新创建的 Pod。而它的“期望状态”，则是：这个 Pod 里被添加了 Envoy 容器的定义。
+
+我还是用一段 Go 语言风格的伪代码，来为你描述这个控制逻辑，如下所示：
+```go
+for {
+  // 获取新创建的Pod
+  pod := client.GetLatestPod()
+  // Diff一下，检查是否已经初始化过
+  if !isInitialized(pod) {
+    // 没有？那就来初始化一下
+    doSomething(pod)
+  }
+}
+```
+- 如果这个 Pod 里面已经添加过 Envoy 容器，那么就“放过”这个 Pod，进入下一个检查周期。
+- 而如果还没有添加过 Envoy 容器的话，它就要进行 Initialize 操作了，即：修改该 Pod 的 API 对象（doSomething 函数）。
+
+这时候，你应该立刻能想到，Istio 要往这个 Pod 里合并的字段，正是我们之前保存在 envoy-initializer 这个 ConfigMap 里的数据（即：它的 data 字段的值）。
+
+所以，在 Initializer 控制器的工作逻辑里，它首先会从 APIServer 中拿到这个 ConfigMap：
+```go
+func doSomething(pod) {
+  cm := client.Get(ConfigMap, "envoy-initializer")
+}
+```
+然后，把这个 ConfigMap 里存储的 containers 和 volumes 字段，直接添加进一个空的 Pod 对象里：
+```go
+func doSomething(pod) {
+  cm := client.Get(ConfigMap, "envoy-initializer")
+  
+  newPod := Pod{}
+  newPod.Spec.Containers = cm.Containers
+  newPod.Spec.Volumes = cm.Volumes
+}
+```
+
+现在，关键来了。
+
+Kubernetes 的 API 库，为我们提供了一个方法，使得我们可以直接使用新旧两个 Pod 对象，生成一个 TwoWayMergePatch：
+```go
+func doSomething(pod) {
+  cm := client.Get(ConfigMap, "envoy-initializer")
+
+  newPod := Pod{}
+  newPod.Spec.Containers = cm.Containers
+  newPod.Spec.Volumes = cm.Volumes
+
+  // 生成patch数据
+  patchBytes := strategicpatch.CreateTwoWayMergePatch(pod, newPod)
+
+  // 发起PATCH请求，修改这个pod对象
+  client.Patch(pod.Name, patchBytes)
+}
+```
+**有了这个 TwoWayMergePatch 之后，Initializer 的代码就可以使用这个 patch 的数据，调用 Kubernetes 的 Client，发起一个 PATCH 请求。**
+
+这样，一个用户提交的 Pod 对象里，就会被自动加上 Envoy 容器相关的字段。
+
+当然，Kubernetes 还允许你通过配置，来指定要对什么样的资源进行这个 Initialize 操作，比如下面这个例子：
+```yaml
+apiVersion: admissionregistration.k8s.io/v1alpha1
+kind: InitializerConfiguration
+metadata:
+  name: envoy-config
+initializers:
+  // 这个名字必须至少包括两个 "."
+  - name: envoy.initializer.kubernetes.io
+    rules:
+      - apiGroups:
+          - "" // 前面说过， ""就是core API Group的意思
+        apiVersions:
+          - v1
+        resources:
+          - pods
+```
+
+这个配置，就意味着 Kubernetes 要对所有的 Pod 进行这个 Initialize 操作，并且，我们指定了负责这个操作的 Initializer，名叫：envoy-initializer。
+
+而一旦这个 InitializerConfiguration 被创建，Kubernetes 就会把这个 Initializer 的名字，加在所有新创建的 Pod 的 Metadata 上，格式如下所示：
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  initializers:
+    pending:
+      - name: envoy.initializer.kubernetes.io
+  name: myapp-pod
+  labels:
+    app: myapp
+# ...
+```
+
+这个 Metadata，正是接下来 Initializer 的控制器判断这个 Pod 有没有执行过自己所负责的初始化操作的重要依据（也就是前面伪代码中 isInitialized() 方法的含义）。
+
+**这也就意味着，当你在 Initializer 里完成了要做的操作后，一定要记得将这个 metadata.initializers.pending 标志清除掉。这一点，你在编写 Initializer 代码的时候一定要非常注意。**
+
+此外，除了上面的配置方法，你还可以在具体的 Pod 的 Annotation 里添加一个如下所示的字段，从而声明要使用某个 Initializer：
+```yaml
+apiVersion: v1
+kind: Pod
+metadata
+  annotations:
+    "initializer.kubernetes.io/envoy": "true"
+    # ...
+```
+
+在这个 Pod 里，我们添加了一个 Annotation，写明： initializer.kubernetes.io/envoy=true。这样，就会使用到我们前面所定义的 envoy-initializer 了。
+
+以上，就是关于 Initializer 最基本的工作原理和使用方法了。相信你此时已经明白，Istio 项目的核心，就是由无数个运行在应用 Pod 中的 Envoy 容器组成的服务代理网格。这也正是 Service Mesh 的含义。
+
+而这个机制得以实现的原理，正是借助了 Kubernetes 能够对 API 对象进行在线更新的能力，这也正是 Kubernetes“声明式 API”的独特之处：
+- 首先，所谓“声明式”，指的就是我只需要提交一个定义好的 API 对象来“声明”，我所期望的状态是什么样子。
+- 其次，“声明式 API”允许有多个 API 写端，以 PATCH 的方式对 API 对象进行修改，而无需关心本地原始 YAML 文件的内容。
+- 最后，也是最重要的，有了上述两个能力，Kubernetes 项目才可以基于对 API 对象的增、删、改、查，在完全无需外界干预的情况下，完成对“实际状态”和“期望状态”的调谐（Reconcile）过程。
+- （声明我的期望状态是什么，然后以在线更新的方式达到期望）
+
+所以说，声明式 API，才是 Kubernetes 项目编排能力“赖以生存”的核心所在，一定要认真理解。
+
+此外，不难看到，无论是对 sidecar 容器的巧妙设计，还是对 Initializer 的合理利用，Istio 项目的设计与实现，其实都依托于 Kubernetes 的声明式 API 和它所提供的各种编排能力。可以说，Istio 是在 Kubernetes 项目使用上的一位“集大成者”。（要知道，一个 Istio 项目部署完成后，会在 Kubernetes 里创建大约 43 个 API 对象。）
+
+所以，Kubernetes 社区也看得很明白：Istio 项目有多火热，就说明 Kubernetes 这套“声明式 API”有多成功。这，既是 Google Cloud 喜闻乐见的事情，也是 Istio 项目一推出就被 Google 公司和整个技术圈儿热捧的重要原因。
+
+而在使用 Initializer 的流程中，最核心的步骤，莫过于 Initializer“自定义控制器”的编写过程。它遵循的，正是标准的“Kubernetes 编程范式”，即：**如何使用控制器模式，同 Kubernetes 里 API 对象的“增、删、改、查”进行协作，进而完成用户业务逻辑的编写过程。**
+
+
+## # 深入解析声明式API（一）：API对象的奥秘
+这个小节主要了解一下 Kubernetes 声明式 API 的工作原理，以及如何利用这套 API 机制，在 Kubernetes 里添加自定义的 API 对象。
+
+你可能一直就很好奇：当我把一个 YAML 文件提交给 Kubernetes 之后，它究竟是如何创建出一个 API 对象的呢？
+
+这得从声明式 API 的设计谈起了。
+
+在 Kubernetes 项目中，一个 API 对象在 Etcd 里的完整资源路径，是由：Group（API 组）、Version（API 版本）和 Resource（API 资源类型）三个部分组成的。
+如图：![](http://cdn.ipso.live/notes/k8s01.png)
+
+在这幅图中，你可以很清楚地看到 Kubernetes 里 API 对象的组织方式，其实是层层递进的。
+
+比如，现在我要声明要创建一个 CronJob 对象，那么我的 YAML 文件的开始部分会这么写：
+```yaml
+apiVersion: batch/v2alpha1
+kind: CronJob
+# ...
+```
+在这个 YAML 文件中，“CronJob”就是这个 API 对象的资源类型（Resource），“batch”就是它的组（Group），v2alpha1 就是它的版本（Version）。
+
+当我们提交了这个 YAML 文件之后，Kubernetes 就会把这个 YAML 文件里描述的内容，转换成 Kubernetes 里的一个 CronJob 对象。
+
+那么，Kubernetes 是如何对 Resource、Group 和 Version 进行解析，从而在 Kubernetes 项目里找到 CronJob 对象的定义呢？
+
+1. 首先，Kubernetes 会匹配 API 对象的组。
+
+需要明确的是，对于 Kubernetes 里的核心 API 对象，比如：Pod、Node 等，是不需要 Group 的（即：它们的 Group 是“”）。所以，对于这些 API 对象来说，Kubernetes 会直接在 /api 这个层级进行下一步的匹配过程。
+
+而对于 CronJob 等非核心 API 对象来说，Kubernetes 就必须在 /apis 这个层级里查找它对应的 Group，进而根据“batch”这个 Group 的名字，找到 /apis/batch。
+
+不难发现，这些 API Group 的分类是以对象功能为依据的，比如 Job 和 CronJob 就都属于“batch” （离线业务）这个 Group。
+
+2. 然后，Kubernetes 会进一步匹配到 API 对象的版本号。
+
+对于 CronJob 这个 API 对象来说，Kubernetes 在 batch 这个 Group 下，匹配到的版本号就是 v2alpha1。
+
+在 Kubernetes 中，同一种 API 对象可以有多个版本，这正是 Kubernetes 进行 API 版本化管理的重要手段。这样，比如在 CronJob 的开发过程中，对于会影响到用户的变更就可以通过升级新版本来处理，从而保证了向后兼容。
+
+3. 最后，Kubernetes 会匹配 API 对象的资源类型。
+
+在前面匹配到正确的版本之后，Kubernetes 就知道，我要创建的原来是一个 /apis/batch/v2alpha1 下的 CronJob 对象。
+
+**这时候，APIServer 就可以继续创建这个 CronJob 对象了。为了方便理解，我总结了如下创建过程：**
+1. 首先，当我们发起了创建 CronJob 的 POST 请求之后，我们编写的 YAML 的信息就被提交给了 APIServer。而 APIServer 的第一个功能，就是过滤这个请求，并完成一些前置性的工作，比如授权、超时处理、审计等。
+
+2. 然后，请求会进入 MUX 和 Routes 流程。如果你编写过 Web Server 的话就会知道，MUX 和 Routes 是 APIServer 完成 URL 和 Handler 绑定的场所。而 APIServer 的 Handler 要做的事情，就是按照我刚刚介绍的匹配过程，找到对应的 CronJob 类型定义。
+
+3. 接着，APIServer 最重要的职责就来了：根据这个 CronJob 类型定义，使用用户提交的 YAML 文件里的字段，创建一个 CronJob 对象。而在这个过程中，APIServer 会进行一个 Convert 工作，即：把用户提交的 YAML 文件，转换成一个叫作 Super Version 的对象，它正是该 API 资源类型所有版本的字段全集。这样用户提交的不同版本的 YAML 文件，就都可以用这个 Super Version 对象来进行处理了。
+
+4. 接下来，APIServer 会先后进行 Admission() 和 Validation() 操作。比如，我在上一篇文章中提到的 Admission Controller 和 Initializer，就都属于 Admission 的内容。而 Validation，则负责验证这个对象里的各个字段是否合法。这个被验证过的 API 对象，都保存在了 APIServer 里一个叫作 Registry 的数据结构中。也就是说，只要一个 API 对象的定义能在 Registry 里查到，它就是一个有效的 Kubernetes API 对象。
+
+5. 最后，APIServer 会把验证过的 API 对象转换成用户最初提交的版本，进行序列化操作，并调用 Etcd 的 API 把它保存起来。
+
+由此可见，声明式 API 对于 Kubernetes 来说非常重要。所以，APIServer 这样一个在其他项目里“平淡无奇”的组件，却成了 Kubernetes 项目的重中之重。它不仅是 Google Borg 设计思想的集中体现，也是 Kubernetes 项目里唯一一个被 Google 公司和 RedHat 公司双重控制、其他势力根本无法参与其中的组件。
+
+此外，由于同时要兼顾性能、API 完备性、版本化、向后兼容等很多工程化指标，所以 Kubernetes 团队在 APIServer 项目里大量使用了 Go 语言的代码生成功能，来自动化诸如 Convert、DeepCopy 等与 API 资源相关的操作。这部分自动生成的代码，曾一度占到 Kubernetes 项目总代码的 20%~30%。
+
+这也是为何，在过去很长一段时间里，在这样一个极其“复杂”的 APIServer 中，添加一个 Kubernetes 风格的 API 资源类型，是一个非常困难的工作。
+
+不过，在 Kubernetes v1.7 之后，这个工作就变得轻松得多了。这，当然得益于一个全新的 API 插件机制：CRD。
+
+#### CRD
+CRD 的全称是 Custom Resource Definition。顾名思义，它指的就是，允许用户在 Kubernetes 中添加一个跟 Pod、Node 类似的、新的 API 资源类型，即：自定义 API 资源。
+
+举个例子，我现在要为 Kubernetes 添加一个名叫 Network 的 API 资源类型。
+
+它的作用是，一旦用户创建一个 Network 对象，那么 Kubernetes 就应该使用这个对象定义的网络参数，调用真实的网络插件，比如 Neutron 项目，为用户创建一个真正的“网络”。这样，将来用户创建的 Pod，就可以声明使用这个“网络”了。
+
+这个 Network 对象的 YAML 文件，名叫 example-network.yaml，它的内容如下所示：
+```yaml
+apiVersion: samplecrd.k8s.io/v1
+kind: Network
+metadata:
+  name: example-network
+spec:
+  cidr: "192.168.0.0/16"
+  gateway: "192.168.0.1"
+```
+可以看到，我想要描述“网络”的 API 资源类型是 Network；API 组是samplecrd.k8s.io；API 版本是 v1。
+
+那么，Kubernetes 又该如何知道这个 API（samplecrd.k8s.io/v1/network）的存在呢？
+
+其实，上面的这个 YAML 文件，就是一个具体的“自定义 API 资源”实例，也叫 CR（Custom Resource）。而为了能够让 Kubernetes 认识这个 CR，你就需要让 Kubernetes 明白这个 CR 的宏观定义是什么，也就是 CRD（Custom Resource Definition）。
+
+这就好比，你想让计算机认识各种兔子的照片，就得先让计算机明白，兔子的普遍定义是什么。比如，兔子“是哺乳动物”“有长耳朵，三瓣嘴”。
+
+所以，接下来，我就先编写一个 CRD 的 YAML 文件，它的名字叫作 network.yaml，内容如下所示：
+```yaml
+apiVersion: apiextensions.k8s.io/v1beta1
+kind: CustomResourceDefinition
+metadata:
+  name: networks.samplecrd.k8s.io
+spec:
+  group: samplecrd.k8s.io
+  version: v1
+  names:
+    kind: Network
+    plural: networks
+  scope: Namespaced
+```
+可以看到，在这个 CRD 中，我指定了“group: samplecrd.k8s.io”“version: v1”这样的 API 信息，也指定了这个 CR 的资源类型叫作 Network，复数（plural）是 networks。
+
+然后，我还声明了它的 scope 是 Namespaced，即：我们定义的这个 Network 是一个属于 Namespace 的对象，类似于 Pod。
+
+这就是一个 Network API 资源类型的 API 部分的宏观定义了。这就等同于告诉了计算机：“兔子是哺乳动物”。所以这时候，Kubernetes 就能够认识和处理所有声明了 API 类型是“samplecrd.k8s.io/v1/network”的 YAML 文件了。
+
+接下来，我还需要让 Kubernetes“认识”这种 YAML 文件里描述的“网络”部分，比如“cidr”（网段），“gateway”（网关）这些字段的含义。这就相当于我要告诉计算机：“兔子有长耳朵和三瓣嘴”。
+
+这时候呢，我就需要稍微做些代码工作了。
+
+```sh
+$ tree <your-go-proj-path>/k8s-controller-custom-resource
+.
+├── controller.go
+├── crd
+│   └── network.yaml
+├── example
+│   └── example-network.yaml
+├── main.go
+└── pkg
+    └── apis
+        └── samplecrd
+            ├── register.go
+            └── v1
+                ├── doc.go
+                ├── register.go
+                └── types.go
+```
+其中，pkg/apis/samplecrd 就是 API 组的名字，v1 是版本，而 v1 下面的 types.go 文件里，则定义了 Network 对象的完整描述。
+
+然后，我在 pkg/apis/samplecrd 目录下创建了一个 register.go 文件，用来放置后面要用到的全局变量。这个文件的内容如下所示：
+```go
+package samplecrd
+
+const (
+ GroupName = "samplecrd.k8s.io"
+ Version   = "v1"
+)
+```
+接着，我需要在 pkg/apis/samplecrd 目录下添加一个 doc.go 文件（Golang 的文档源文件）。这个文件里的内容如下所示：
+```go
+// +k8s:deepcopy-gen=package
+
+// +groupName=samplecrd.k8s.io
+package v1
+```
+在这个文件中，你会看到 +[=value]格式的注释，这就是 Kubernetes 进行代码生成要用的 Annotation 风格的注释。
+
+其中，+k8s:deepcopy-gen=package 意思是，请为整个 v1 包里的所有类型定义自动生成 DeepCopy 方法；而+groupName=samplecrd.k8s.io，则定义了这个包对应的 API 组的名字。
+
+可以看到，这些定义在 doc.go 文件的注释，起到的是全局的代码生成控制的作用，所以也被称为 Global Tags。
+
+接下来，我需要添加 types.go 文件。顾名思义，它的作用就是定义一个 Network 类型到底有哪些字段（比如，spec 字段里的内容）。这个文件的主要内容如下所示：
+
+
