@@ -4018,5 +4018,1219 @@ package v1
 可以看到，这些定义在 doc.go 文件的注释，起到的是全局的代码生成控制的作用，所以也被称为 Global Tags。
 
 接下来，我需要添加 types.go 文件。顾名思义，它的作用就是定义一个 Network 类型到底有哪些字段（比如，spec 字段里的内容）。这个文件的主要内容如下所示：
+```go
+package v1
+...
+// +genclient
+// +genclient:noStatus
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
+// Network describes a Network resource
+type Network struct {
+ // TypeMeta is the metadata for the resource, like kind and apiversion
+ metav1.TypeMeta `json:",inline"`
+ // ObjectMeta contains the metadata for the particular object, including
+ // things like...
+ //  - name
+ //  - namespace
+ //  - self link
+ //  - labels
+ //  - ... etc ...
+ metav1.ObjectMeta `json:"metadata,omitempty"`
+ 
+ Spec networkspec `json:"spec"`
+}
+// networkspec is the spec for a Network resource
+type networkspec struct {
+ Cidr    string `json:"cidr"`
+ Gateway string `json:"gateway"`
+}
+
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
+// NetworkList is a list of Network resources
+type NetworkList struct {
+ metav1.TypeMeta `json:",inline"`
+ metav1.ListMeta `json:"metadata"`
+ 
+ Items []Network `json:"items"`
+}
+```
+在上面这部分代码里，你可以看到 Network 类型定义方法跟标准的 Kubernetes 对象一样，都包括了 TypeMeta（API 元数据）和 ObjectMeta（对象元数据）字段。
+
+而其中的 Spec 字段，就是需要我们自己定义的部分。所以，在 networkspec 里，我定义了 Cidr 和 Gateway 两个字段。其中，每个字段最后面的部分比如json:"cidr"，指的就是这个字段被转换成 JSON 格式之后的名字，也就是 YAML 文件里的字段名字。
+
+**此外，除了定义 Network 类型，你还需要定义一个 NetworkList 类型，用来描述一组 Network 对象应该包括哪些字段。之所以需要这样一个类型，是因为在 Kubernetes 中，获取所有 X 对象的 List() 方法，返回值都是List 类型，而不是 X 类型的数组。这是不一样的。**
+
+同样地，在 Network 和 NetworkList 类型上，也有代码生成注释。
+
+其中，+genclient 的意思是：请为下面这个 API 资源类型生成对应的 Client 代码（这个 Client，我马上会讲到）。而 +genclient:noStatus 的意思是：这个 API 资源类型定义里，没有 Status 字段。否则，生成的 Client 就会自动带上 UpdateStatus 方法。
+
+如果你的类型定义包括了 Status 字段的话，就不需要这句 +genclient:noStatus 注释了。比如下面这个例子：
+```go
+// +genclient
+
+// Network is a specification for a Network resource
+type Network struct {
+ metav1.TypeMeta   `json:",inline"`
+ metav1.ObjectMeta `json:"metadata,omitempty"`
+ 
+ Spec   NetworkSpec   `json:"spec"`
+ Status NetworkStatus `json:"status"`
+}
+```
+需要注意的是，+genclient 只需要写在 Network 类型上，而不用写在 NetworkList 上。因为 NetworkList 只是一个返回值类型，Network 才是“主类型”。
+
+而由于我在 Global Tags 里已经定义了为所有类型生成 DeepCopy 方法，所以这里就不需要再显式地加上 +k8s:deepcopy-gen=true 了。当然，这也就意味着你可以用 +k8s:deepcopy-gen=false 来阻止为某些类型生成 DeepCopy。
+
+你可能已经注意到，在这两个类型上面还有一句+k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object的注释。它的意思是，请在生成 DeepCopy 的时候，实现 Kubernetes 提供的 runtime.Object 接口。否则，在某些版本的 Kubernetes 里，你的这个类型定义会出现编译错误。这是一个固定的操作，记住即可。
+
+不过，你或许会有这样的顾虑：这些代码生成注释这么灵活，我该怎么掌握呢？
+
+其实，上面我所讲述的内容，已经足以应对 99% 的场景了。当然，如果你对代码生成感兴趣的话，我推荐你阅读[这篇博客](https://blog.openshift.com/kubernetes-deep-dive-code-generation-customresources/)，它详细地介绍了 Kubernetes 的代码生成语法。
+
+最后，我需要再编写一个 pkg/apis/samplecrd/v1/register.go 文件。
+
+在前面对 APIServer 工作原理部分，我已经提到，“registry”的作用就是注册一个类型（Type）给 APIServer。其中，Network 资源类型在服务器端注册的工作，APIServer 会自动帮我们完成。但与之对应的，我们还需要让客户端也能“知道”Network 资源类型的定义。这就需要我们在项目里添加一个 register.go 文件。它最主要的功能，就是定义了如下所示的 addKnownTypes() 方法：
+```go
+package v1
+...
+// addKnownTypes adds our types to the API scheme by registering
+// Network and NetworkList
+func addKnownTypes(scheme *runtime.Scheme) error {
+ scheme.AddKnownTypes(
+  SchemeGroupVersion,
+  &Network{},
+  &NetworkList{},
+ )
+ 
+ // register the type in the scheme
+ metav1.AddToGroupVersion(scheme, SchemeGroupVersion)
+ return nil
+}
+```
+有了这个方法，Kubernetes 就能够在后面生成客户端的时候，“知道”Network 以及 NetworkList 类型的定义了。
+
+**像上面这种 register.go 文件里的内容其实是非常固定的，你以后可以直接使用我提供的这部分代码做模板，然后把其中的资源类型、GroupName 和 Version 替换成你自己的定义即可。**
+
+这样，Network 对象的定义工作就全部完成了。可以看到，它其实定义了两部分内容：
+- 第一部分是，自定义资源类型的 API 描述，包括：组（Group）、版本（Version）、资源类型（Resource）等。这相当于告诉了计算机：兔子是哺乳动物。
+- 第二部分是，自定义资源类型的对象描述，包括：Spec、Status 等。这相当于告诉了计算机：兔子有长耳朵和三瓣嘴。
+
+接下来，我就要使用 Kubernetes 提供的代码生成工具，为上面定义的 Network 资源类型自动生成 clientset、informer 和 lister。其中，clientset 就是操作 Network 对象所需要使用的客户端，而 informer 和 lister 这两个包的主要功能参考下一小节的内容。
+
+这个代码生成工具名叫k8s.io/code-generator，使用方法如下所示：
+```sh
+# 代码生成的工作目录，也就是我们的项目路径
+$ ROOT_PACKAGE="github.com/resouer/k8s-controller-custom-resource"
+# API Group
+$ CUSTOM_RESOURCE_NAME="samplecrd"
+# API Version
+$ CUSTOM_RESOURCE_VERSION="v1"
+
+# 安装k8s.io/code-generator
+$ go get -u k8s.io/code-generator/...
+$ cd $GOPATH/src/k8s.io/code-generator
+
+# 执行代码自动生成，其中pkg/client是生成目标目录，pkg/apis是类型定义目录
+$ ./generate-groups.sh all "$ROOT_PACKAGE/pkg/client" "$ROOT_PACKAGE/pkg/apis" "$CUSTOM_RESOURCE_NAME:$CUSTOM_RESOURCE_VERSION"
+```
+代码生成工作完成之后，我们再查看一下这个项目的目录结构：
+```sh
+$ tree
+.
+├── controller.go
+├── crd
+│   └── network.yaml
+├── example
+│   └── example-network.yaml
+├── main.go
+└── pkg
+    ├── apis
+    │   └── samplecrd
+    │       ├── constants.go
+    │       └── v1
+    │           ├── doc.go
+    │           ├── register.go
+    │           ├── types.go
+    │           └── zz_generated.deepcopy.go
+    └── client
+        ├── clientset
+        ├── informers
+        └── listers
+```
+其中，pkg/apis/samplecrd/v1 下面的 zz_generated.deepcopy.go 文件，就是自动生成的 DeepCopy 代码文件。
+
+而整个 client 目录，以及下面的三个包（clientset、informers、 listers），都是 Kubernetes 为 Network 类型生成的客户端库，这些库会在后面编写自定义控制器的时候用到。
+
+可以看到，到目前为止的这些工作，其实并不要求你写多少代码，主要考验的是“复制、粘贴、替换”这样的“基本功”。
+
+而有了这些内容，现在你就可以在 Kubernetes 集群里创建一个 Network 类型的 API 对象了。我们不妨一起来试验下。
+
+1. 首先，使用 network.yaml 文件，在 Kubernetes 中创建 Network 对象的 CRD（Custom Resource Definition）：
+```sh
+$ kubectl apply -f crd/network.yaml
+customresourcedefinition.apiextensions.k8s.io/networks.samplecrd.k8s.io created
+```
+
+这个操作，就告诉了 Kubernetes，我现在要添加一个自定义的 API 对象。而这个对象的 API 信息，正是 network.yaml 里定义的内容。我们可以通过 kubectl get 命令，查看这个 CRD：
+```sh
+$ kubectl get crd
+NAME                        CREATED AT
+networks.samplecrd.k8s.io   2018-09-15T10:57:12Z
+```
+
+2. 然后，我们就可以创建一个 Network 对象了，这里用到的是 example-network.yaml：
+```sh
+$ kubectl apply -f example/example-network.yaml 
+network.samplecrd.k8s.io/example-network created
+```
+通过这个操作，你就在 Kubernetes 集群里创建了一个 Network 对象。它的 API 资源路径是samplecrd.k8s.io/v1/networks。
+
+这时候，你就可以通过 kubectl get 命令，查看到新创建的 Network 对象：
+```sh
+$ kubectl get network
+NAME              AGE
+example-network   8s
+```
+你还可以通过 kubectl describe 命令，看到这个 Network 对象的细节：
+```sh
+$ kubectl describe network example-network
+Name:         example-network
+Namespace:    default
+Labels:       <none>
+...API Version:  samplecrd.k8s.io/v1
+Kind:         Network
+Metadata:
+  ...
+  Generation:          1
+  Resource Version:    468239
+  ...
+Spec:
+  Cidr:     192.168.0.0/16
+  Gateway:  192.168.0.1
+```
+当然 ，你也可以编写更多的 YAML 文件来创建更多的 Network 对象，这和创建 Pod、Deployment 的操作，没有任何区别。
+
+
+## # 深入解析声明式API（二）：编写自定义控制器
+在上一小节中，详细分享了 Kubernetes 中声明式 API 的实现原理，并且通过一个添加 Network 对象的实例，讲述了在 Kubernetes 里添加 API 资源的过程。
+
+在这小节中，继续完成剩下一半的工作，即：为 Network 这个自定义 API 对象编写一个自定义控制器（Custom Controller）。
+
+**正如我在上一小节结尾处提到的，“声明式 API”并不像“命令式 API”那样有着明显的执行逻辑。这就使得基于声明式 API 的业务功能实现，往往需要通过控制器模式来“监视”API 对象的变化（比如，创建或者删除 Network），然后以此来决定实际要执行的具体工作。**
+
+接下来，我就和你一起通过编写代码来实现这个过程。这个项目和上一小节里的代码是同一个项目。
+
+**总得来说，编写自定义控制器代码的过程包括：编写 main 函数、编写自定义控制器的定义，以及编写控制器里的业务逻辑三个部分。**
+
+#### 首先，我们来编写这个自定义控制器的 main 函数。
+main 函数的主要工作就是，定义并初始化一个自定义控制器（Custom Controller），然后启动它。这部分代码的主要内容如下所示：
+```go
+func main() {
+  // ...
+  
+  cfg, err := clientcmd.BuildConfigFromFlags(masterURL, kubeconfig)
+  // ...
+  kubeClient, err := kubernetes.NewForConfig(cfg)
+  // ...
+  networkClient, err := clientset.NewForConfig(cfg)
+  // ...
+  
+  networkInformerFactory := informers.NewSharedInformerFactory(networkClient, ...)
+  
+  controller := NewController(kubeClient, networkClient,
+  networkInformerFactory.Samplecrd().V1().Networks())
+  
+  go networkInformerFactory.Start(stopCh)
+ 
+  if err = controller.Run(2, stopCh); err != nil {
+    glog.Fatalf("Error running controller: %s", err.Error())
+  }
+}
+```
+可以看到，这个 main 函数主要通过三步完成了初始化并启动一个自定义控制器的工作。
+1. 第一步：main 函数根据我提供的 Master 配置（APIServer 的地址端口和 kubeconfig 的路径），创建一个 Kubernetes 的 client（kubeClient）和 Network 对象的 client（networkClient）。
+
+但是，如果我没有提供 Master 配置呢？
+
+这时，main 函数会直接使用一种名叫 InClusterConfig 的方式来创建这个 client。这个方式，会假设你的自定义控制器是以 Pod 的方式运行在 Kubernetes 集群里的。
+
+而我在 Pod 使用进阶小节中曾经提到过，Kubernetes 里所有的 Pod 都会以 Volume 的方式自动挂载 Kubernetes 的默认 ServiceAccount。所以，这个控制器就会直接使用默认 ServiceAccount 数据卷里的授权信息，来访问 APIServer。
+
+2. 第二步：main 函数为 Network 对象创建一个叫作 InformerFactory（即：networkInformerFactory）的工厂，并使用它生成一个 Network 对象的 Informer，传递给控制器。
+
+3. 第三步：main 函数启动上述的 Informer，然后执行 controller.Run，启动自定义控制器。
+
+至此，main 函数就结束了。
+
+看到这，你可能会感到非常困惑：编写自定义控制器的过程难道就这么简单吗？这个 Informer 又是个什么东西呢？
+
+别着急。接下来，我就为你详细解释一下这个自定义控制器的工作原理。
+
+在 Kubernetes 项目中，一个自定义控制器的工作原理，可以用下面这样一幅流程图来表示（在后面的叙述中，我会用“示意图”来指代它）：
+![](http://cdn.ipso.live/notes/k8s02.png)
+
+我们先从这幅示意图的最左边看起。
+
+这个控制器要做的第一件事，是从 Kubernetes 的 APIServer 里获取它所关心的对象，也就是我定义的 Network 对象。
+
+这个操作，依靠的是一个叫作 Informer（可以翻译为：通知器）的代码库完成的。Informer 与 API 对象是一一对应的，所以我传递给自定义控制器的，正是一个 Network 对象的 Informer（Network Informer）。
+
+不知你是否已经注意到，我在创建这个 Informer 工厂的时候，需要给它传递一个 networkClient。
+
+事实上，Network Informer 正是使用这个 networkClient，跟 APIServer 建立了连接。不过，真正负责维护这个连接的，则是 Informer 所使用的 Reflector 包。
+
+更具体地说，Reflector 使用的是一种叫作 ListAndWatch 的方法，来“获取”并“监听”这些 Network 对象实例的变化。
+
+在 ListAndWatch 机制下，一旦 APIServer 端有新的 Network 实例被创建、删除或者更新，Reflector 都会收到“事件通知”。这时，该事件及它对应的 API 对象这个组合，就被称为增量（Delta），它会被放进一个 Delta FIFO Queue（即：增量先进先出队列）中。
+
+而另一方面，Informe 会不断地从这个 Delta FIFO Queue 里读取（Pop）增量。每拿到一个增量，Informer 就会判断这个增量里的事件类型，然后创建或者更新本地对象的缓存。这个缓存，在 Kubernetes 里一般被叫作 Store。
+
+比如，如果事件类型是 Added（添加对象），那么 Informer 就会通过一个叫作 Indexer 的库把这个增量里的 API 对象保存在本地缓存中，并为它创建索引。相反，如果增量的事件类型是 Deleted（删除对象），那么 Informer 就会从本地缓存中删除这个对象。
+
+这个同步本地缓存的工作，是 Informer 的第一个职责，也是它最重要的职责。
+
+而 Informer 的第二个职责，则是根据这些事件的类型，触发事先注册好的 ResourceEventHandler。这些 Handler，需要在创建控制器的时候注册给它对应的 Informer。
+
+接下来，我们就来编写这个控制器的定义，它的主要内容如下所示：
+```go
+func NewController(
+  kubeclientset kubernetes.Interface,
+  networkclientset clientset.Interface,
+  networkInformer informers.NetworkInformer) *Controller {
+  ...
+  controller := &Controller{
+    kubeclientset:    kubeclientset,
+    networkclientset: networkclientset,
+    networksLister:   networkInformer.Lister(),
+    networksSynced:   networkInformer.Informer().HasSynced,
+    workqueue:        workqueue.NewNamedRateLimitingQueue(...,  "Networks"),
+    ...
+  }
+    networkInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+    AddFunc: controller.enqueueNetwork,
+    UpdateFunc: func(old, new interface{}) {
+      oldNetwork := old.(*samplecrdv1.Network)
+      newNetwork := new.(*samplecrdv1.Network)
+      if oldNetwork.ResourceVersion == newNetwork.ResourceVersion {
+        return
+      }
+      controller.enqueueNetwork(new)
+    },
+    DeleteFunc: controller.enqueueNetworkForDelete,
+ return controller
+}
+```
+**我前面在 main 函数里创建了两个 client（kubeclientset 和 networkclientset），然后在这段代码里，使用这两个 client 和前面创建的 Informer，初始化了自定义控制器。**
+
+值得注意的是，在这个自定义控制器里，我还设置了一个工作队列（work queue），它正是处于示意图中间位置的 WorkQueue。这个工作队列的作用是，负责同步 Informer 和控制循环之间的数据。(实际上，Kubernetes 项目为我们提供了很多个工作队列的实现，你可以根据需要选择合适的库直接使用。)
+
+**然后，我为 networkInformer 注册了三个 Handler（AddFunc、UpdateFunc 和 DeleteFunc），分别对应 API 对象的“添加”“更新”和“删除”事件。而具体的处理操作，都是将该事件对应的 API 对象加入到工作队列中。**
+
+需要注意的是，实际入队的并不是 API 对象本身，而是它们的 Key，即：该 API 对象的namespace/name。
+
+而我们后面即将编写的控制循环，则会不断地从这个工作队列里拿到这些 Key，然后开始执行真正的控制逻辑。
+
+**综合上面的讲述，你现在应该就能明白，所谓 Informer，其实就是一个带有本地缓存和索引机制的、可以注册 EventHandler 的 client。它是自定义控制器跟 APIServer 进行数据同步的重要组件。**
+
+更具体地说，Informer 通过一种叫作 ListAndWatch 的方法，把 APIServer 中的 API 对象缓存在了本地，并负责更新和维护这个缓存。
+
+其中，ListAndWatch 方法的含义是：首先，通过 APIServer 的 LIST API“获取”所有最新版本的 API 对象；然后，再通过 WATCH API 来“监听”所有这些 API 对象的变化。
+
+而通过监听到的事件变化，Informer 就可以实时地更新本地缓存，并且调用这些事件对应的 EventHandler 了。
+
+此外，在这个过程中，每经过 resyncPeriod 指定的时间，Informer 维护的本地缓存，都会使用最近一次 LIST 返回的结果强制更新一次，从而保证缓存的有效性。在 Kubernetes 中，这个缓存强制更新的操作就叫作：resync。
+
+需要注意的是，这个定时 resync 操作，也会触发 Informer 注册的“更新”事件。但此时，这个“更新”事件对应的 Network 对象实际上并没有发生变化，即：新、旧两个 Network 对象的 ResourceVersion 是一样的。在这种情况下，Informer 就不需要对这个更新事件再做进一步的处理了。
+
+这也是为什么我在上面的 UpdateFunc 方法里，先判断了一下新、旧两个 Network 对象的版本（ResourceVersion）是否发生了变化，然后才开始进行的入队操作。
+
+以上，就是 Kubernetes 中的 Informer 库的工作原理了。
+
+接下来，我们就来到了示意图中最后面的控制循环（Control Loop）部分，也正是我在 main 函数最后调用 controller.Run() 启动的“控制循环”。它的主要内容如下所示：
+```go
+func (c *Controller) Run(threadiness int, stopCh <-chan struct{}) error {
+ ...
+  if ok := cache.WaitForCacheSync(stopCh, c.networksSynced); !ok {
+    return fmt.Errorf("failed to wait for caches to sync")
+  }
+  
+  ...
+  for i := 0; i < threadiness; i++ {
+    go wait.Until(c.runWorker, time.Second, stopCh)
+  }
+  
+  ...
+  return nil
+}
+```
+可以看到，启动控制循环的逻辑非常简单：
+- 首先，等待 Informer 完成一次本地缓存的数据同步操作；
+- 然后，直接通过 goroutine 启动一个（或者并发启动多个）“无限循环”的任务。
+
+而这个“无限循环”任务的每一个循环周期，执行的正是我们真正关心的业务逻辑。
+
+所以接下来，我们就来编写这个自定义控制器的业务逻辑，它的主要内容如下所示：
+```go
+func (c *Controller) runWorker() {
+  for c.processNextWorkItem() {
+  }
+}
+
+func (c *Controller) processNextWorkItem() bool {
+  obj, shutdown := c.workqueue.Get()
+  
+  ...
+  
+  err := func(obj interface{}) error {
+    ...
+    if err := c.syncHandler(key); err != nil {
+     return fmt.Errorf("error syncing '%s': %s", key, err.Error())
+    }
+    
+    c.workqueue.Forget(obj)
+    ...
+    return nil
+  }(obj)
+  
+  ...
+  
+  return true
+}
+
+func (c *Controller) syncHandler(key string) error {
+
+  namespace, name, err := cache.SplitMetaNamespaceKey(key)
+  ...
+  
+  network, err := c.networksLister.Networks(namespace).Get(name)
+  if err != nil {
+    if errors.IsNotFound(err) {
+      glog.Warningf("Network does not exist in local cache: %s/%s, will delete it from Neutron ...",
+      namespace, name)
+      
+      glog.Warningf("Network: %s/%s does not exist in local cache, will delete it from Neutron ...",
+    namespace, name)
+    
+     // FIX ME: call Neutron API to delete this network by name.
+     //
+     // neutron.Delete(namespace, name)
+     
+     return nil
+  }
+    ...
+    
+    return err
+  }
+  
+  glog.Infof("[Neutron] Try to process network: %#v ...", network)
+  
+  // FIX ME: Do diff().
+  //
+  // actualNetwork, exists := neutron.Get(namespace, name)
+  //
+  // if !exists {
+  //   neutron.Create(namespace, name)
+  // } else if !reflect.DeepEqual(actualNetwork, network) {
+  //   neutron.Update(namespace, name)
+  // }
+  
+  return nil
+}
+```
+可以看到，在这个执行周期里（processNextWorkItem），我们首先从工作队列里出队（workqueue.Get）了一个成员，也就是一个 Key（Network 对象的：namespace/name）。
+
+然后，在 syncHandler 方法中，我使用这个 Key，尝试从 Informer 维护的缓存中拿到了它所对应的 Network 对象。
+
+可以看到，在这里，我使用了 networksLister 来尝试获取这个 Key 对应的 Network 对象。这个操作，其实就是在访问本地缓存的索引。实际上，在 Kubernetes 的源码中，你会经常看到控制器从各种 Lister 里获取对象，比如：podLister、nodeLister 等等，它们使用的都是 Informer 和缓存机制。
+
+而如果控制循环从缓存中拿不到这个对象（即：networkLister 返回了 IsNotFound 错误），那就意味着这个 Network 对象的 Key 是通过前面的“删除”事件添加进工作队列的。所以，尽管队列里有这个 Key，但是对应的 Network 对象已经被删除了。
+
+这时候，我就需要调用 Neutron 的 API，把这个 Key 对应的 Neutron 网络从真实的集群里删除掉。
+
+而如果能够获取到对应的 Network 对象，我就可以执行控制器模式里的对比“期望状态”和“实际状态”的逻辑了。
+
+其中，自定义控制器“千辛万苦”拿到的这个 Network 对象，正是 APIServer 里保存的“期望状态”，即：用户通过 YAML 文件提交到 APIServer 里的信息。当然，在我们的例子里，它已经被 Informer 缓存在了本地。
+
+那么，“实际状态”又从哪里来呢？
+
+当然是来自于实际的集群了。
+
+所以，我们的控制循环需要通过 Neutron API 来查询实际的网络情况。
+
+比如，我可以先通过 Neutron 来查询这个 Network 对象对应的真实网络是否存在。
+
+- 如果不存在，这就是一个典型的“期望状态”与“实际状态”不一致的情形。这时，我就需要使用这个 Network 对象里的信息（比如：CIDR 和 Gateway），调用 Neutron API 来创建真实的网络。
+- 如果存在，那么，我就要读取这个真实网络的信息，判断它是否跟 Network 对象里的信息一致，从而决定我是否要通过 Neutron 来更新这个已经存在的真实网络。
+
+这样，我就通过对比“期望状态”和“实际状态”的差异，完成了一次调协（Reconcile）的过程。
+
+至此，一个完整的自定义 API 对象和它所对应的自定义控制器，就编写完毕了。（备注：与 Neutron 相关的业务代码并不是这里的重点，所以我仅仅通过注释里的伪代码为你表述了这部分内容。如果你对这些代码感兴趣的话，可以自行完成。最简单的情况，你可以自己编写一个 Neutron Mock，然后输出对应的操作日志。）
+
+接下来，我们就一起来把这个项目运行起来，查看一下它的工作情况。
+
+你可以自己编译这个项目，也可以直接使用我编译好的二进制文件（samplecrd-controller）。编译并启动这个项目的具体流程如下所示：
+```sh
+# Clone repo
+$ git clone https://github.com/resouer/k8s-controller-custom-resource$ cd k8s-controller-custom-resource
+
+### Skip this part if you don't want to build
+# Install dependency
+$ go get github.com/tools/godep
+$ godep restore
+# Build
+$ go build -o samplecrd-controller .
+
+$ ./samplecrd-controller -kubeconfig=$HOME/.kube/config -alsologtostderr=true
+I0915 12:50:29.051349   27159 controller.go:84] Setting up event handlers
+I0915 12:50:29.051615   27159 controller.go:113] Starting Network control loop
+I0915 12:50:29.051630   27159 controller.go:116] Waiting for informer caches to sync
+E0915 12:50:29.066745   27159 reflector.go:134] github.com/resouer/k8s-controller-custom-resource/pkg/client/informers/externalversions/factory.go:117: Failed to list *v1.Network: the server could not find the requested resource (get networks.samplecrd.k8s.io)
+...
+```
+（**注意：这里是直接运行可执行文件，也可以像 Istio 项目的 Envoy 容器组将一样使用 sider car 的方式在pod中运行**）
+
+你可以看到，自定义控制器被启动后，一开始会报错。
+
+这是因为，此时 Network 对象的 CRD 还没有被创建出来，所以 Informer 去 APIServer 里“获取”（List）Network 对象时，并不能找到 Network 这个 API 资源类型的定义，即：
+```sh
+Failed to list *v1.Network: the server could not find the requested resource (get networks.samplecrd.k8s.io)
+```
+所以，接下来我就需要创建 Network 对象的 CRD，这个操作在上一篇文章里已经介绍过了。
+
+在另一个 shell 窗口里执行：
+```sh
+$ kubectl apply -f crd/network.yaml
+```
+这时候，你就会看到控制器的日志恢复了正常，控制循环启动成功：
+```log
+...
+I0915 12:50:29.051630   27159 controller.go:116] Waiting for informer caches to sync
+...
+I0915 12:52:54.346854   25245 controller.go:121] Starting workers
+I0915 12:52:54.346914   25245 controller.go:127] Started workers
+```
+
+接下来，我就可以进行 Network 对象的增删改查操作了。
+
+首先，创建一个 Network 对象：
+```yaml
+$ cat example/example-network.yaml 
+apiVersion: samplecrd.k8s.io/v1
+kind: Network
+metadata:
+  name: example-network
+spec:
+  cidr: "192.168.0.0/16"
+  gateway: "192.168.0.1"
+  
+$ kubectl apply -f example/example-network.yaml 
+network.samplecrd.k8s.io/example-network created
+```
+
+这时候，查看一下控制器的输出：
+```log
+...
+I0915 12:50:29.051349   27159 controller.go:84] Setting up event handlers
+I0915 12:50:29.051615   27159 controller.go:113] Starting Network control loop
+I0915 12:50:29.051630   27159 controller.go:116] Waiting for informer caches to sync
+...
+I0915 12:52:54.346854   25245 controller.go:121] Starting workers
+I0915 12:52:54.346914   25245 controller.go:127] Started workers
+I0915 12:53:18.064409   25245 controller.go:229] [Neutron] Try to process network: &v1.Network{TypeMeta:v1.TypeMeta{Kind:"", APIVersion:""}, ObjectMeta:v1.ObjectMeta{Name:"example-network", GenerateName:"", Namespace:"default", ... ResourceVersion:"479015", ... Spec:v1.NetworkSpec{Cidr:"192.168.0.0/16", Gateway:"192.168.0.1"}} ...
+I0915 12:53:18.064650   25245 controller.go:183] Successfully synced 'default/example-network'
+...
+```
+
+可以看到，我们上面创建 example-network 的操作，触发了 EventHandler 的“添加”事件，从而被放进了工作队列。
+
+紧接着，控制循环就从队列里拿到了这个对象，并且打印出了正在“处理”这个 Network 对象的日志。
+
+可以看到，这个 Network 的 ResourceVersion，也就是 API 对象的版本号，是 479015，而它的 Spec 字段的内容，跟我提交的 YAML 文件一摸一样，比如，它的 CIDR 网段是：192.168.0.0/16。
+
+这时候，我来修改一下这个 YAML 文件的内容，如下所示：
+```sh
+$ cat example/example-network.yaml 
+apiVersion: samplecrd.k8s.io/v1
+kind: Network
+metadata:
+  name: example-network
+spec:
+  cidr: "192.168.1.0/16"
+  gateway: "192.168.1.1"
+```
+可以看到，我把这个 YAML 文件里的 CIDR 和 Gateway 字段修改成了 192.168.1.0/16 网段。
+
+然后，我们执行了 kubectl apply 命令来提交这次更新，如下所示：
+```sh
+$ kubectl apply -f example/example-network.yaml 
+network.samplecrd.k8s.io/example-network configured
+```
+
+这时候，我们就可以观察一下控制器的输出:
+```log
+...
+I0915 12:53:51.126029   25245 controller.go:229] [Neutron] Try to process network: &v1.Network{TypeMeta:v1.TypeMeta{Kind:"", APIVersion:""}, ObjectMeta:v1.ObjectMeta{Name:"example-network", GenerateName:"", Namespace:"default", ...  ResourceVersion:"479062", ... Spec:v1.NetworkSpec{Cidr:"192.168.1.0/16", Gateway:"192.168.1.1"}} ...
+I0915 12:53:51.126348   25245 controller.go:183] Successfully synced 'default/example-network'
+```
+
+可以看到，这一次，Informer 注册的“更新”事件被触发，更新后的 Network 对象的 Key 被添加到了工作队列之中。
+
+所以，接下来控制循环从工作队列里拿到的 Network 对象，与前一个对象是不同的：它的 ResourceVersion 的值变成了 479062；而 Spec 里的字段，则变成了 192.168.1.0/16 网段。
+
+最后，我再把这个对象删除掉：
+```sh
+$ kubectl delete -f example/example-network.yaml
+```
+
+这一次，在控制器的输出里，我们就可以看到，Informer 注册的“删除”事件被触发，并且控制循环“调用”Neutron API“删除”了真实环境里的网络。这个输出如下所示：
+```log
+W0915 12:54:09.738464   25245 controller.go:212] Network: default/example-network does not exist in local cache, will delete it from Neutron ...
+I0915 12:54:09.738832   25245 controller.go:215] [Neutron] Deleting network: default/example-network ...
+I0915 12:54:09.738854   25245 controller.go:183] Successfully synced 'default/example-network'
+```
+
+以上，就是编写和使用自定义控制器的全部流程了。
+
+**实际上，这套流程不仅可以用在自定义 API 资源上，也完全可以用在 Kubernetes 原生的默认 API 对象上。**
+
+比如，我们在 main 函数里，除了创建一个 Network Informer 外，还可以初始化一个 Kubernetes 默认 API 对象的 Informer 工厂，比如 Deployment 对象的 Informer。这个具体做法如下所示：
+```go
+func main() {
+  ...
+  
+  kubeInformerFactory := kubeinformers.NewSharedInformerFactory(kubeClient, time.Second*30)
+  
+  controller := NewController(kubeClient, exampleClient,
+  kubeInformerFactory.Apps().V1().Deployments(),
+  networkInformerFactory.Samplecrd().V1().Networks())
+  
+  go kubeInformerFactory.Start(stopCh)
+  ...
+}
+```
+
+在这段代码中，我们首先使用 Kubernetes 的 client（kubeClient）创建了一个工厂；
+
+然后，我用跟 Network 类似的处理方法，生成了一个 Deployment Informer；
+
+接着，我把 Deployment Informer 传递给了自定义控制器；当然，我也要调用 Start 方法来启动这个 Deployment Informer。
+
+而有了这个 Deployment Informer 后，这个控制器也就持有了所有 Deployment 对象的信息。接下来，它既可以通过 deploymentInformer.Lister() 来获取 Etcd 里的所有 Deployment 对象，也可以为这个 Deployment Informer 注册具体的 Handler 来。
+
+**更重要的是，这就使得在这个自定义控制器里面，我可以通过对自定义 API 对象和默认 API 对象进行协同，从而实现更加复杂的编排功能。**
+
+比如：用户每创建一个新的 Deployment，这个自定义控制器，就可以为它创建一个对应的 Network 供它使用。
+
+这些对 Kubernetes API 编程范式的更高级应用，我就留给你在实际的场景中去探索和实践了。
+
+#### 总结
+在今天这小节中，我剖析了 Kubernetes API 编程范式的具体原理，并编写了一个自定义控制器。这其中，有如下几个概念和机制，是你一定要理解清楚的：
+
+所谓的 Informer，就是一个自带缓存和索引机制，可以触发 Handler 的客户端库。这个本地缓存在 Kubernetes 中一般被称为 Store，索引一般被称为 Index。
+
+Informer 使用了 Reflector 包，它是一个可以通过 ListAndWatch 机制获取并监视 API 对象变化的客户端封装。
+
+Reflector 和 Informer 之间，用到了一个“增量先进先出队列”进行协同。而 Informer 与你要编写的控制循环之间，则使用了一个工作队列来进行协同。
+
+在实际应用中，除了控制循环之外的所有代码，实际上都是 Kubernetes 为你自动生成的，即：pkg/client/{informers, listers, clientset}里的内容。
+
+而这些自动生成的代码，就为我们提供了一个可靠而高效地获取 API 对象“期望状态”的编程库。
+
+所以，接下来，作为开发者，你就只需要关注如何拿到“实际状态”，然后如何拿它去跟“期望状态”做对比，从而决定接下来要做的业务逻辑即可。
+
+以上内容，就是 Kubernetes API 编程范式的核心思想。
+
+#### 请思考一下，为什么 Informer 和你编写的控制循环之间，一定要使用一个工作队列来进行协作呢？
+Informer 和控制循环分开是为了解耦，防止控制循环执行过慢把Informer 拖死
+
+
+## # 基于角色的权限控制：RBAC
+在前面的几个小节中，已经熟悉了很多种 Kubernetes 内置的编排对象，以及对应的控制器模式的实现原理。此外，还剖析了自定义 API 资源类型和控制器的编写方式。
+
+这时候，你可能已经冒出了这样一个想法：控制器模式看起来好像也不难嘛，我能不能自己写一个编排对象呢？
+
+**答案当然是可以的。而且，这才是 Kubernetes 项目最具吸引力的地方。**
+
+毕竟，在互联网级别的大规模集群里，Kubernetes 内置的编排对象，很难做到完全满足所有需求。所以，很多实际的容器化工作，都会要求你设计一个自己的编排对象，实现自己的控制器模式。
+
+而在 Kubernetes 项目里，我们可以基于插件机制来完成这些工作，而完全不需要修改任何一行代码。
+
+不过，你要通过一个外部插件，在 Kubernetes 里新增和操作 API 对象，那么就必须先了解一个非常重要的知识：RBAC。
+
+我们知道，Kubernetes 中所有的 API 对象，都保存在 Etcd 里。可是，对这些 API 对象的操作，却一定都是通过访问 kube-apiserver 实现的。其中一个非常重要的原因，就是你需要 APIServer 来帮助你做授权工作。
+
+**而在 Kubernetes 项目中，负责完成授权（Authorization）工作的机制，就是 RBAC：基于角色的访问控制（Role-Based Access Control）。**
+
+如果你直接查看 Kubernetes 项目中关于 RBAC 的文档的话，可能会感觉非常复杂。但实际上，等到你用到这些 RBAC 的细节时，再去查阅也不迟。
+
+**而在这里，我只希望你能明确三个最基本的概念。**
+1. Role：角色，它其实是一组规则，定义了一组对 Kubernetes API 对象的操作权限。
+2. Subject：被作用者，既可以是“人”，也可以是“机器”，也可以是你在 Kubernetes 里定义的“用户”。
+3. RoleBinding：定义了“被作用者”和“角色”的绑定关系。
+
+而这三个概念，其实就是整个 RBAC 体系的核心所在。
+
+#### 先来了解一下 Role
+实际上，Role 本身就是一个 Kubernetes 的 API 对象，定义如下所示：
+```yaml
+kind: Role
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  namespace: mynamespace
+  name: example-role
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "watch", "list"]
+```
+首先，这个 Role 对象指定了它能产生作用的 Namepace 是：mynamespace。
+
+Namespace 是 Kubernetes 项目里的一个逻辑管理单位。不同 Namespace 的 API 对象，在通过 kubectl 命令进行操作的时候，是互相隔离开的。
+
+比如，kubectl get pods -n mynamespace。
+
+当然，这仅限于逻辑上的“隔离”，Namespace 并不会提供任何实际的隔离或者多租户能力。而没有指定 Namespace，那就是使用的是默认 Namespace：default。
+
+然后，这个 Role 对象的 rules 字段，就是它所定义的权限规则。在上面的例子里，这条规则的含义就是：允许“被作用者”，对 mynamespace 下面的 Pod 对象，进行 GET、WATCH 和 LIST 操作。
+
+那么，这个具体的“被作用者”又是如何指定的呢？这就需要通过 RoleBinding 来实现了。
+
+当然，RoleBinding 本身也是一个 Kubernetes 的 API 对象。它的定义如下所示：
+```yaml
+kind: RoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: example-rolebinding
+  namespace: mynamespace
+subjects:
+- kind: User
+  name: example-user
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: Role
+  name: example-role
+  apiGroup: rbac.authorization.k8s.io
+```
+可以看到，这个 RoleBinding 对象里定义了一个 subjects 字段，即“被作用者”。它的类型是 User，即 Kubernetes 里的用户。这个用户的名字是 example-user。
+
+可是，在 Kubernetes 中，其实并没有一个叫作“User”的 API 对象。而且，我们在前面和部署使用 Kubernetes 的流程里，既不需要 User，也没有创建过 User。
+
+这个 User 到底是从哪里来的呢？
+
+**实际上，Kubernetes 里的“User”，也就是“用户”，只是一个授权系统里的逻辑概念。它需要通过外部认证服务，比如 Keystone，来提供。或者，你也可以直接给 APIServer 指定一个用户名、密码文件。那么 Kubernetes 的授权系统，就能够从这个文件里找到对应的“用户”了。当然，在大多数私有的使用环境中，我们只要使用 Kubernetes 提供的内置“用户”，就足够了。这部分知识，后面马上会讲到。**
+
+接下来，我们会看到一个 roleRef 字段。正是通过这个字段，RoleBinding 对象就可以直接通过名字，来引用我们前面定义的 Role 对象（example-role），从而定义了“被作用者（Subject）”和“角色（Role）”之间的绑定关系。
+
+需要再次提醒的是，Role 和 RoleBinding 对象都是 Namespaced 对象（Namespaced Object），它们对权限的限制规则仅在它们自己的 Namespace 内有效，roleRef 也只能引用当前 Namespace 里的 Role 对象。
+
+那么，对于非 Namespaced（Non-namespaced）对象（比如：Node），或者，某一个 Role 想要作用于所有的 Namespace 的时候，我们又该如何去做授权呢？
+
+这时候，我们就必须要使用 ClusterRole 和 ClusterRoleBinding 这两个组合了。这两个 API 对象的用法跟 Role 和 RoleBinding 完全一样。只不过，它们的定义里，没有了 Namespace 字段，如下所示：
+```yaml
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: example-clusterrole
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "watch", "list"]
+```
+
+```yaml
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: example-clusterrolebinding
+subjects:
+- kind: User
+  name: example-user
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: ClusterRole
+  name: example-clusterrole
+  apiGroup: rbac.authorization.k8s.io
+```
+上面的例子里的 ClusterRole 和 ClusterRoleBinding 的组合，意味着名叫 example-user 的用户，拥有对所有 Namespace 里的 Pod 进行 GET、WATCH 和 LIST 操作的权限。
+
+更进一步地，在 Role 或者 ClusterRole 里面，如果要赋予用户 example-user 所有权限，那你就可以给它指定一个 verbs 字段的全集，如下所示：
+```yaml
+verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+```
+
+这些就是当前 Kubernetes（v1.11）里能够对 API 对象进行的所有操作了。
+
+类似地，Role 对象的 rules 字段也可以进一步细化。比如，你可以只针对某一个具体的对象进行权限设置，如下所示：
+```yaml
+rules:
+- apiGroups: [""]
+  resources: ["configmaps"]
+  resourceNames: ["my-config"]
+  verbs: ["get"]
+```
+这个例子就表示，这条规则的“被作用者”，只对名叫“my-config”的 ConfigMap 对象，有进行 GET 操作的权限。
+
+而正如我前面介绍过的，在大多数时候，我们其实都不太使用“用户”这个功能，而是直接使用 Kubernetes 里的“内置用户”。
+
+这个由 Kubernetes 负责管理的“内置用户”，正是我们前面曾经提到过的：ServiceAccount。
+
+接下来，我通过一个具体的实例来为你讲解一下为 ServiceAccount 分配权限的过程。
+
+首先，我们要定义一个 ServiceAccount。它的 API 对象非常简单，如下所示：
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  namespace: mynamespace
+  name: example-sa
+```
+可以看到，一个最简单的 ServiceAccount 对象只需要 Name 和 Namespace 这两个最基本的字段。
+
+然后，我们通过编写 RoleBinding 的 YAML 文件，来为这个 ServiceAccount 分配权限：
+```yaml
+kind: RoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: example-rolebinding
+  namespace: mynamespace
+subjects:
+- kind: ServiceAccount
+  name: example-sa
+  namespace: mynamespace
+roleRef:
+  kind: Role
+  name: example-role
+  apiGroup: rbac.authorization.k8s.io
+```
+**可以看到，在这个 RoleBinding 对象里，subjects 字段的类型（kind），不再是一个 User，而是一个名叫 example-sa 的 ServiceAccount。而 roleRef 引用的 Role 对象，依然名叫 example-role，也就是我在这篇文章一开始定义的 Role 对象。**
+
+接着，我们用 kubectl 命令创建这三个对象：
+```sh
+$ kubectl create -f svc-account.yaml
+$ kubectl create -f role-binding.yaml
+$ kubectl create -f role.yaml
+```
+
+然后，我们来查看一下这个 ServiceAccount 的详细信息：
+```sh
+$ kubectl get sa -n mynamespace -o yaml
+- apiVersion: v1
+  kind: ServiceAccount
+  metadata:
+    creationTimestamp: 2018-09-08T12:59:17Z
+    name: example-sa
+    namespace: mynamespace
+    resourceVersion: "409327"
+    ...
+  secrets:
+  - name: example-sa-token-vmfg6
+```
+可以看到，Kubernetes 会为一个 ServiceAccount 自动创建并分配一个 Secret 对象，即：上述 ServiceAcount 定义里最下面的 secrets 字段。
+
+这个 Secret，就是这个 ServiceAccount 对应的、用来跟 APIServer 进行交互的授权文件，我们一般称它为：Token。Token 文件的内容一般是证书或者密码，它以一个 Secret 对象的方式保存在 Etcd 当中。
+
+这时候，用户的 Pod，就可以声明使用这个 ServiceAccount 了，比如下面这个例子：
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  namespace: mynamespace
+  name: sa-token-test
+spec:
+  containers:
+  - name: nginx
+    image: nginx:1.7.9
+  serviceAccountName: example-sa
+```
+在这个例子里，我定义了 Pod 要使用的 ServiceAccount 的名字是：example-sa。
+
+等这个 Pod 运行起来之后，我们就可以看到，该 ServiceAccount 的 token，也就是一个 Secret 对象，被 Kubernetes 自动挂载到了容器的 /var/run/secrets/kubernetes.io/serviceaccount 目录下，如下所示：
+```sh
+$ kubectl describe pod sa-token-test -n mynamespace
+Name:               sa-token-test
+Namespace:          mynamespace
+...
+Containers:
+  nginx:
+    ...
+    Mounts:
+      /var/run/secrets/kubernetes.io/serviceaccount from example-sa-token-vmfg6 (ro)
+```
+
+这时候，我们可以通过 kubectl exec 查看到这个目录里的文件：
+```sh
+$ kubectl exec -it sa-token-test -n mynamespace -- /bin/bash
+root@sa-token-test:/# ls /var/run/secrets/kubernetes.io/serviceaccount
+ca.crt namespace  token
+```
+如上所示，容器里的应用，就可以使用这个 ca.crt 来访问 APIServer 了。更重要的是，此时它只能够做 GET、WATCH 和 LIST 操作。因为 example-sa 这个 ServiceAccount 的权限，已经被我们绑定了 Role 做了限制。
+
+此外，我在 Pod 使用进阶小节中曾经提到过，如果一个 Pod 没有声明 serviceAccountName，Kubernetes 会自动在它的 Namespace 下创建一个名叫 default 的默认 ServiceAccount，然后分配给这个 Pod。
+
+但在这种情况下，这个默认 ServiceAccount 并没有关联任何 Role。也就是说，此时它有访问 APIServer 的绝大多数权限。当然，这个访问所需要的 Token，还是默认 ServiceAccount 对应的 Secret 对象为它提供的，如下所示。
+```sh
+$kubectl describe sa default
+Name:                default
+Namespace:           default
+Labels:              <none>
+Annotations:         <none>
+Image pull secrets:  <none>
+Mountable secrets:   default-token-s8rbq
+Tokens:              default-token-s8rbq
+Events:              <none>
+
+$ kubectl get secret
+NAME                  TYPE                                  DATA      AGE
+kubernetes.io/service-account-token   3         82d
+
+$ kubectl describe secret default-token-s8rbq
+Name:         default-token-s8rbq
+Namespace:    default
+Labels:       <none>
+Annotations:  kubernetes.io/service-account.name=default
+              kubernetes.io/service-account.uid=ffcb12b2-917f-11e8-abde-42010aa80002
+
+Type:  kubernetes.io/service-account-token
+
+Data
+====
+ca.crt:     1025 bytes
+namespace:  7 bytes
+token:      <TOKEN数据>
+```
+可以看到，Kubernetes 会自动为默认 ServiceAccount 创建并绑定一个特殊的 Secret：它的类型是kubernetes.io/service-account-token；它的 Annotation 字段，声明了kubernetes.io/service-account.name=default，即这个 Secret 会跟同一 Namespace 下名叫 default 的 ServiceAccount 进行绑定。
+
+**所以，在生产环境中，我强烈建议你为所有 Namespace 下的默认 ServiceAccount，绑定一个只读权限的 Role。（相当于限制所有使用默认ServiceAccount的用户，只拥有只读权限。）**
+
+除了前面使用的“用户”（User），Kubernetes 还拥有“用户组”（Group）的概念，也就是一组“用户”的意思。如果你为 Kubernetes 配置了外部认证服务的话，这个“用户组”的概念就会由外部认证服务提供。
+
+而对于 Kubernetes 的内置“用户”ServiceAccount 来说，上述“用户组”的概念也同样适用。
+
+实际上，一个 ServiceAccount，在 Kubernetes 里对应的“用户”的名字是：```system:serviceaccount:<Namespace名字>:<ServiceAccount名字>```（SA具有特定命名的用户名称，也有用户组名称，特别的同一个NameSpace下的用户同属一组）
+
+而它对应的内置“用户组”的名字，就是：```system:serviceaccounts:<Namespace名字>```
+
+**这两个对应关系，请你一定要牢记。**
+
+比如，现在我们可以在 RoleBinding 里定义如下的 subjects：
+```yaml
+subjects:
+- kind: Group
+  name: system:serviceaccounts:mynamespace
+  apiGroup: rbac.authorization.k8s.io
+```
+这就意味着这个 Role 的权限规则，作用于 mynamespace 里的所有 ServiceAccount。这就用到了“用户组”的概念。
+
+而下面这个例子：
+```yaml
+subjects:
+- kind: Group
+  name: system:serviceaccounts
+  apiGroup: rbac.authorization.k8s.io
+```
+就意味着这个 Role 的权限规则，作用于整个系统里的所有 ServiceAccount。
+
+**最后，值得一提的是，在 Kubernetes 中已经内置了很多个为系统保留的 ClusterRole，它们的名字都以 system: 开头。你可以通过 kubectl get clusterroles 查看到它们。**
+```sh
+[root@k8s-node2 ~]# kubectl get clusterroles
+NAME                                                                   CREATED AT
+admin                                                                  2023-05-28T07:55:02Z
+calico-cni-plugin                                                      2023-05-28T08:09:53Z
+calico-crds                                                            2023-05-28T08:13:57Z
+calico-extension-apiserver-auth-access                                 2023-05-28T08:13:58Z
+calico-kube-controllers                                                2023-05-28T08:09:53Z
+calico-node                                                            2023-05-28T08:09:53Z
+calico-typha                                                           2023-05-28T08:09:52Z
+calico-webhook-reader                                                  2023-05-28T08:13:58Z
+cluster-admin                                                          2023-05-28T07:55:02Z
+edit                                                                   2023-05-28T07:55:02Z
+kubeadm:get-nodes                                                      2023-05-28T07:55:04Z
+kubernetes-dashboard                                                   2023-06-29T08:18:32Z
+system:aggregate-to-admin                                              2023-05-28T07:55:02Z
+system:aggregate-to-edit                                               2023-05-28T07:55:02Z
+system:aggregate-to-view                                               2023-05-28T07:55:02Z
+system:auth-delegator                                                  2023-05-28T07:55:02Z
+system:basic-user                                                      2023-05-28T07:55:02Z
+system:certificates.k8s.io:certificatesigningrequests:nodeclient       2023-05-28T07:55:02Z
+system:certificates.k8s.io:certificatesigningrequests:selfnodeclient   2023-05-28T07:55:02Z
+system:certificates.k8s.io:kube-apiserver-client-approver              2023-05-28T07:55:02Z
+system:certificates.k8s.io:kube-apiserver-client-kubelet-approver      2023-05-28T07:55:02Z
+system:certificates.k8s.io:kubelet-serving-approver                    2023-05-28T07:55:02Z
+system:certificates.k8s.io:legacy-unknown-approver                     2023-05-28T07:55:02Z
+system:controller:attachdetach-controller                              2023-05-28T07:55:02Z
+system:controller:certificate-controller                               2023-05-28T07:55:02Z
+system:controller:clusterrole-aggregation-controller                   2023-05-28T07:55:02Z
+system:controller:cronjob-controller                                   2023-05-28T07:55:02Z
+system:controller:daemon-set-controller                                2023-05-28T07:55:02Z
+system:controller:deployment-controller                                2023-05-28T07:55:02Z
+system:controller:disruption-controller                                2023-05-28T07:55:02Z
+system:controller:endpoint-controller                                  2023-05-28T07:55:02Z
+system:controller:endpointslice-controller                             2023-05-28T07:55:02Z
+system:controller:endpointslicemirroring-controller                    2023-05-28T07:55:02Z
+system:controller:ephemeral-volume-controller                          2023-05-28T07:55:02Z
+system:controller:expand-controller                                    2023-05-28T07:55:02Z
+system:controller:generic-garbage-collector                            2023-05-28T07:55:02Z
+system:controller:horizontal-pod-autoscaler                            2023-05-28T07:55:02Z
+system:controller:job-controller                                       2023-05-28T07:55:02Z
+system:controller:namespace-controller                                 2023-05-28T07:55:02Z
+system:controller:node-controller                                      2023-05-28T07:55:02Z
+system:controller:persistent-volume-binder                             2023-05-28T07:55:02Z
+system:controller:pod-garbage-collector                                2023-05-28T07:55:02Z
+system:controller:pv-protection-controller                             2023-05-28T07:55:02Z
+system:controller:pvc-protection-controller                            2023-05-28T07:55:02Z
+system:controller:replicaset-controller                                2023-05-28T07:55:02Z
+system:controller:replication-controller                               2023-05-28T07:55:02Z
+system:controller:resourcequota-controller                             2023-05-28T07:55:02Z
+system:controller:root-ca-cert-publisher                               2023-05-28T07:55:02Z
+system:controller:route-controller                                     2023-05-28T07:55:02Z
+system:controller:service-account-controller                           2023-05-28T07:55:02Z
+system:controller:service-controller                                   2023-05-28T07:55:02Z
+system:controller:statefulset-controller                               2023-05-28T07:55:02Z
+system:controller:ttl-after-finished-controller                        2023-05-28T07:55:02Z
+system:controller:ttl-controller                                       2023-05-28T07:55:02Z
+system:coredns                                                         2023-05-28T07:55:04Z
+system:discovery                                                       2023-05-28T07:55:02Z
+system:heapster                                                        2023-05-28T07:55:02Z
+system:kube-aggregator                                                 2023-05-28T07:55:02Z
+system:kube-controller-manager                                         2023-05-28T07:55:02Z
+system:kube-dns                                                        2023-05-28T07:55:02Z
+system:kube-scheduler                                                  2023-05-28T07:55:02Z
+system:kubelet-api-admin                                               2023-05-28T07:55:02Z
+system:monitoring                                                      2023-05-28T07:55:02Z
+system:node                                                            2023-05-28T07:55:02Z
+system:node-bootstrapper                                               2023-05-28T07:55:02Z
+system:node-problem-detector                                           2023-05-28T07:55:02Z
+system:node-proxier                                                    2023-05-28T07:55:02Z
+system:persistent-volume-provisioner                                   2023-05-28T07:55:02Z
+system:public-info-viewer                                              2023-05-28T07:55:02Z
+system:service-account-issuer-discovery                                2023-05-28T07:55:02Z
+system:volume-scheduler                                                2023-05-28T07:55:02Z
+tigera-operator                                                        2023-05-28T08:07:55Z
+view                                                                   2023-05-28T07:55:02Z
+[root@k8s-node2 ~]#
+```
+
+一般来说，这些系统 ClusterRole，是绑定给 Kubernetes 系统组件对应的 ServiceAccount 使用的。
+
+比如，其中一个名叫 system:kube-scheduler 的 ClusterRole，定义的权限规则是 kube-scheduler（Kubernetes 的调度器组件）运行所需要的必要权限。你可以通过如下指令查看这些权限的列表：
+```sh
+[root@k8s-node2 ~]# kubectl describe clusterrole system:kube-scheduler
+Name:         system:kube-scheduler
+Labels:       kubernetes.io/bootstrapping=rbac-defaults
+Annotations:  rbac.authorization.kubernetes.io/autoupdate: true
+PolicyRule:
+  Resources                                  Non-Resource URLs  Resource Names    Verbs
+  ---------                                  -----------------  --------------    -----
+  events                                     []                 []                [create patch update]
+  events.events.k8s.io                       []                 []                [create patch update]
+  bindings                                   []                 []                [create]
+  endpoints                                  []                 []                [create]
+  pods/binding                               []                 []                [create]
+  tokenreviews.authentication.k8s.io         []                 []                [create]
+  subjectaccessreviews.authorization.k8s.io  []                 []                [create]
+  leases.coordination.k8s.io                 []                 []                [create]
+  pods                                       []                 []                [delete get list watch]
+  namespaces                                 []                 []                [get list watch]
+  nodes                                      []                 []                [get list watch]
+  persistentvolumeclaims                     []                 []                [get list watch]
+  persistentvolumes                          []                 []                [get list watch]
+  replicationcontrollers                     []                 []                [get list watch]
+  services                                   []                 []                [get list watch]
+  replicasets.apps                           []                 []                [get list watch]
+  statefulsets.apps                          []                 []                [get list watch]
+  replicasets.extensions                     []                 []                [get list watch]
+  poddisruptionbudgets.policy                []                 []                [get list watch]
+  csidrivers.storage.k8s.io                  []                 []                [get list watch]
+  csinodes.storage.k8s.io                    []                 []                [get list watch]
+  csistoragecapacities.storage.k8s.io        []                 []                [get list watch]
+  endpoints                                  []                 [kube-scheduler]  [get update]
+  leases.coordination.k8s.io                 []                 [kube-scheduler]  [get update]
+  pods/status                                []                 []                [patch update]
+[root@k8s-node2 ~]#
+```
+这个 system:kube-scheduler 的 ClusterRole，就会被绑定给 kube-system Namesapce 下名叫 kube-scheduler 的 ServiceAccount，它正是 Kubernetes 调度器的 Pod 声明使用的 ServiceAccount。
+
+除此之外，Kubernetes 还提供了四个预先定义好的 ClusterRole 来供用户直接使用：
+1. cluster-admin；
+2. admin；
+3. edit；
+4. view。
+
+通过它们的名字，能大致猜出它们都定义了哪些权限。比如，这个名叫 view 的 ClusterRole，就规定了被作用者只有 Kubernetes API 的只读权限。
+
+**还要提醒你的是，上面这个 cluster-admin 角色，对应的是整个 Kubernetes 项目中的最高权限（verbs=*），如下所示：**
+```sh
+[root@k8s-node2 ~]# kubectl describe clusterrole cluster-admin -n kube-system
+Name:         cluster-admin
+Labels:       kubernetes.io/bootstrapping=rbac-defaults        
+Annotations:  rbac.authorization.kubernetes.io/autoupdate: true
+PolicyRule:
+  Resources  Non-Resource URLs  Resource Names  Verbs
+  ---------  -----------------  --------------  -----
+  *.*        []                 []              [*]
+             [*]                []              [*]
+[root@k8s-node2 ~]#
+```
+
+**所以，请你务必要谨慎而小心地使用 cluster-admin。**
+
+#### 总结
+主要了解了基于角色的访问控制（RBAC）。
+
+其实，你现在已经能够理解，所谓角色（Role），其实就是一组权限规则列表。而我们分配这些权限的方式，就是通过创建 RoleBinding 对象，将被作用者（subject）和权限列表进行绑定。
+
+另外，与之对应的 ClusterRole 和 ClusterRoleBinding，则是 Kubernetes 集群级别的 Role 和 RoleBinding，它们的作用范围不受 Namespace 限制。
+
+而尽管权限的被作用者可以有很多种（比如，User、Group 等），但在我们平常的使用中，最普遍的用法还是 ServiceAccount。所以，Role + RoleBinding + ServiceAccount 的权限分配方式是你要重点掌握的内容。我们在后面编写和安装各种插件的时候，会经常用到这个组合。
+
+#### 请问，如何为所有 Namespace 下的默认 ServiceAccount（default ServiceAccount），绑定一个只读权限的 Role 呢？请你提供 ClusterRoleBinding（或者 RoleBinding）的 YAML 文件。
+
+```yaml
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: readonly-all-default
+subjects:
+- kind: ServiceAccount
+  name: default
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: ClusterRole
+  name: view
+  apiGroup: rbac.authorization.k8s.io
+```
+
+
+## # 聪明的微创新：Operator工作原理解读
+在前面已经分享了 Kubernetes 项目中的大部分编排对象（比如 Deployment、StatefulSet、DaemonSet，以及 Job），也介绍了“有状态应用”的管理方法，还阐述了为 Kubernetes 添加自定义 API 对象和编写自定义控制器的原理和流程。
+
+可能你已经感觉到，在 Kubernetes 中，管理“有状态应用”是一个比较复杂的过程，尤其是编写 Pod 模板的时候，总有一种“在 YAML 文件里编程序”的感觉，让人很不舒服。
+
+**而在 Kubernetes 生态中，还有一个相对更加灵活和编程友好的管理“有状态应用”的解决方案，它就是：Operator。**
+
+接下来，就以 Etcd Operator 为例，来了解一下 Operator 的工作原理和编写方法。
+
+Etcd Operator 的使用方法非常简单，只需要两步即可完成：
+1. 第一步，将这个 Operator 的代码 Clone 到本地：
+```sh
+$ git clone https://github.com/coreos/etcd-operator
+```
+
+2. 第二步，将这个 Etcd Operator 部署在 Kubernetes 集群里。
+
+不过，在部署 Etcd Operator 的 Pod 之前，你需要先执行这样一个脚本：
+```sh
+$ example/rbac/create_role.sh
+```
+不用我多说你也能够明白：这个脚本的作用，就是为 Etcd Operator 创建 RBAC 规则。这是因为，Etcd Operator 需要访问 Kubernetes 的 APIServer 来创建对象。
+
+更具体地说，上述脚本为 Etcd Operator 定义了如下所示的权限：
+   1. 对 Pod、Service、PVC、Deployment、Secret 等 API 对象，有所有权限；
+   2. 对 CRD 对象，有所有权限；
+   3. 对属于 etcd.database.coreos.com 这个 API Group 的 CR（Custom Resource）对象，有所有权限。
+
+而 Etcd Operator 本身，其实就是一个 Deployment，它的 YAML 文件如下所示：
+```yaml
+apiVersion: extensions/v1beta1
+kind: Deployment
+metadata:
+  name: etcd-operator
+spec:
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        name: etcd-operator
+    spec:
+      containers:
+      - name: etcd-operator
+        image: quay.io/coreos/etcd-operator:v0.9.2
+        command:
+        - etcd-operator
+        env:
+        - name: MY_POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: MY_POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+...
+```
+
+所以，我们就可以使用上述的 YAML 文件来创建 Etcd Operator，如下所示：
+```sh
+$ kubectl create -f example/deployment.yaml
+```
+
+而一旦 Etcd Operator 的 Pod 进入了 Running 状态，你就会发现，有一个 CRD 被自动创建了出来，如下所示：
+```sh
+$ kubectl get pods
+NAME                              READY     STATUS      RESTARTS   AGE
+etcd-operator-649dbdb5cb-bzfzp    1/1       Running     0          20s
+
+$ kubectl get crd
+NAME                                    CREATED AT
+etcdclusters.etcd.database.coreos.com   2018-09-18T11:42:55Z
+```
+
+这个 CRD 名叫etcdclusters.etcd.database.coreos.com 。你可以通过 kubectl describe 命令看到它的细节，如下所示：
+```sh
+$ kubectl describe crd  etcdclusters.etcd.database.coreos.com
+...
+Group:   etcd.database.coreos.com
+  Names:
+    Kind:       EtcdCluster
+    List Kind:  EtcdClusterList
+    Plural:     etcdclusters
+    Short Names:
+      etcd
+    Singular:  etcdcluster
+  Scope:       Namespaced
+  Version:     v1beta2
+  
+...
+```
+可以看到，这个 CRD 相当于告诉了 Kubernetes：接下来，如果有 API 组（Group）是etcd.database.coreos.com、API 资源类型（Kind）是“EtcdCluster”的 YAML 文件被提交上来，你可一定要认识啊。
+
+所以说，通过上述两步操作，你实际上是在 Kubernetes 里添加了一个名叫 EtcdCluster 的自定义资源类型。而 Etcd Operator 本身，就是这个自定义资源类型对应的自定义控制器。
+
+而当 Etcd Operator 部署好之后，接下来在这个 Kubernetes 里创建一个 Etcd 集群的工作就非常简单了。你只需要编写一个 EtcdCluster 的 YAML 文件，然后把它提交给 Kubernetes 即可，如下所示：
+```sh
+$ kubectl apply -f example/example-etcd-cluster.yaml
+```
+这个 example-etcd-cluster.yaml 文件里描述的，是一个 3 个节点的 Etcd 集群。我们可以看到它被提交给 Kubernetes 之后，就会有三个 Etcd 的 Pod 运行起来，如下所示：
+```sh
+$ kubectl get pods
+NAME                            READY     STATUS    RESTARTS   AGE
+example-etcd-cluster-dp8nqtjznc   1/1       Running     0          1m
+example-etcd-cluster-mbzlg6sd56   1/1       Running     0          2m
+example-etcd-cluster-v6v6s6stxd   1/1       Running     0          2m
+```
+
+那么，究竟发生了什么，让创建一个 Etcd 集群的工作如此简单呢？
+
+我们当然还是得从这个 example-etcd-cluster.yaml 文件开始说起。
+
+不难想到，这个文件里定义的，正是 EtcdCluster 这个 CRD 的一个具体实例，也就是一个 Custom Resource（CR）。而它的内容非常简单，如下所示：
+```yaml
+apiVersion: "etcd.database.coreos.com/v1beta2"
+kind: "EtcdCluster"
+metadata:
+  name: "example-etcd-cluster"
+spec:
+  size: 3
+  version: "3.2.13"
+```
+
+可以看到，EtcdCluster 的 spec 字段非常简单。其中，size=3 指定了它所描述的 Etcd 集群的节点个数。而 version=“3.2.13”，则指定了 Etcd 的版本，仅此而已。
+
+而真正把这样一个 Etcd 集群创建出来的逻辑，就是 Etcd Operator 要实现的主要工作了。
+
+看到这里，相信你应该已经对 Operator 有了一个初步的认知：
+
+**Operator 的工作原理，实际上是利用了 Kubernetes 的自定义 API 资源（CRD），来描述我们想要部署的“有状态应用”；然后在自定义控制器里，根据自定义 API 对象的变化，来完成具体的部署和运维工作。**
 
