@@ -1635,6 +1635,544 @@ Watch 特性的核心实现模块是 watchableStore，它通过将 watcher 划�
 最后一个事件匹配性能问题，etcd 基于 map 和区间树实现了 watcher 与事件快速匹配，保障了大规模场景下的 Watch 机制性能和读写稳定性。
 
 
+---
+
+## # 事务：如何安全地实现多key操作？
+在软件开发过程中，我们经常会遇到需要批量执行多个 key 操作的业务场景，比如转账案例中，Alice 给 Bob 转账 100 元，Alice 账号减少 100，Bob 账号增加 100，这涉及到多个 key 的原子更新。
+
+无论发生任何故障，我们应用层期望的结果是，要么两个操作一起成功，要么两个一起失败。我们无法容忍出现一个成功，一个失败的情况。那么 etcd 是如何解决多 key 原子更新问题呢？
+
+这正是我今天要和你分享的主题——事务，它就是为了简化应用层的编程模型而诞生的。将通过转账案例为你剖析 etcd 事务实现，让你了解 etcd 如何实现事务 ACID 特性的，以及 MVCC 版本号在事务中的重要作用。希望通过本节课，帮助你在业务开发中正确使用事务，保证软件代码的正确性。
+
+#### 事务特性初体验及 API
+如何使用 etcd 实现 Alice 向 Bob 转账功能呢？
+
+在 etcd v2 的时候， **etcd 提供了 CAS（Compare and swap），然而其只支持单 key，不支持多 key**，因此无法满足类似转账场景的需求。严格意义上说 CAS 称不上事务，无法实现事务的各个隔离级别。
+
+etcd v3 为了解决多 key 的原子操作问题，提供了全新迷你事务 API，同时基于 MVCC 版本号，它可以实现各种隔离级别的事务。它的基本结构如下：
+```go
+client.Txn(ctx).If(cmp1, cmp2, ...).Then(op1, op2, ...,).Else(op1, op2, …)
+```
+
+从上面结构中可以看到，事务 API 由 If 语句、Then 语句、Else 语句组成，这与我们平时常见的 MySQL 事务完全不一样。
+
+它的基本原理是，在 If 语句中，你可以添加一系列的条件表达式，若条件表达式全部通过检查，则执行 Then 语句的 get/put/delete 等操作，否则执行 Else 的 get/put/delete 等操作。
+
+那么 If 语句支持哪些检查项呢？
+
+首先是 key 的最近一次修改版本号 mod_revision，简称 mod。你可以通过它检查 key 最近一次被修改时的版本号是否符合你的预期。比如当你查询到 Alice 账号资金为 100 元时，它的 mod_revision 是 v1，当你发起转账操作时，你得确保 Alice 账号上的 100 元未被挪用，这就可以通过 mod(“Alice”) = “v1” 条件表达式来保障转账安全性。
+
+其次是 key 的创建版本号 create_revision，简称 create。你可以通过它检查 key 是否已存在。比如在分布式锁场景里，只有分布式锁 key(lock) 不存在的时候，你才能发起 put 操作创建锁，这时你可以通过 create(“lock”) = "0"来判断，因为一个 key 不存在的话它的 create_revision 版本号就是 0。
+
+接着是 key 的修改次数 version。你可以通过它检查 key 的修改次数是否符合预期。比如你期望 key 在修改次数小于 3 时，才能发起某些操作时，可以通过 version(“key”) < "3"来判断。
+
+最后是 key 的 value 值。你可以通过检查 key 的 value 值是否符合预期，然后发起某些操作。比如期望 Alice 的账号资金为 200, value(“Alice”) = “200”。
+
+If 语句通过以上 MVCC 版本号、value 值、各种比较运算符 (等于、大于、小于、不等于)，实现了灵活的比较的功能，满足你各类业务场景诉求。
+
+下面给出了一个使用 etcdctl 的 txn 事务命令，基于以上介绍的特性，初步实现的一个 Alice 向 Bob 转账 100 元的事务。
+
+Alice 和 Bob 初始账上资金分别都为 200 元，事务首先判断 Alice 账号资金是否为 200，若是则执行转账操作，不是则返回最新资金。etcd 是如何执行这个事务的呢？这个事务实现上有哪些问题呢？
+
+```sh
+$ etcdctl txn -i
+compares: //对应If语句
+value("Alice") = "200" //判断Alice账号资金是否为200
+
+
+success requests (get, put, del): //对应Then语句
+put Alice 100 //Alice账号初始资金200减100
+put Bob 300 //Bob账号初始资金200加100
+
+
+failure requests (get, put, del): //对应Else语句
+get Alice  
+get Bob
+
+
+SUCCESS
+
+
+OK
+
+OK
+
+```
+
+#### 整体流程
+
+![p28](http://cdn.ipso.live/notes/etcd/etcd028.png)
+
+在和你介绍上面案例中的 etcd 事务原理和问题前，先介绍下事务的整体流程，为后面介绍 etcd 事务 ACID 特性的实现做准备。
+
+上图是 etcd 事务的执行流程，当你通过 client 发起一个 txn 转账事务操作时，通过 gRPC KV Server、Raft 模块处理后，在 Apply 模块执行此事务的时候，它首先对你的事务的 If 语句进行检查，也就是 ApplyCompares 操作，如果通过此操作，则执行 ApplyTxn/Then 语句，否则执行 ApplyTxn/Else 语句。
+
+在执行以上操作过程中，它会根据事务是否只读、可写，通过 MVCC 层的读写事务对象，执行事务中的 get/put/delete 各操作，也就是我们上一节课介绍的 MVCC 对 key 的读写原理。
+
+#### 事务 ACID 特性
+了解完事务的整体执行流程后，那么 etcd 应该如何正确实现上面案例中 Alice 向 Bob 转账的事务呢？别着急，我们先来了解一下事务的 ACID 特性。在你了解了 etcd 事务 ACID 特性实现后，这个转账事务案例的正确解决方案也就简单了。
+
+ACID 是衡量事务的四个特性，由原子性（Atomicity）、一致性（Consistency）、隔离性（Isolation）、持久性（Durability）组成。接下来我就为你分析 ACID 特性在 etcd 中的实现。
+
+#### 原子性与持久性
+事务的原子性（Atomicity）是指在一个事务中，所有请求要么同时成功，要么同时失败。比如在我们的转账案例中，是绝对无法容忍 Alice 账号扣款成功，但是 Bob 账号资金到账失败的场景。
+
+持久性（Durability）是指事务一旦提交，其所做的修改会永久保存在数据库。
+
+软件系统在运行过程中会遇到各种各样的软硬件故障，如果 etcd 在执行上面事务过程中，刚执行完扣款命令（put Alice 100）就突然 crash 了，它是如何保证转账事务的原子性与持久性的呢？
+
+![p29](http://cdn.ipso.live/notes/etcd/etcd029.png)
+
+如上图转账事务流程图所示，etcd 在执行一个事务过程中，任何时间点都可能会出现节点 crash 等异常问题。我在图中给你标注了两个关键的异常时间点，它们分别是 T1 和 T2。接下来我分别为你分析一下 etcd 在这两个关键时间点异常后，是如何保证事务的原子性和持久性的。
+
+**T1 时间点**
+
+T1 时间点是在 Alice 账号扣款 100 元完成时，Bob 账号资金还未成功增加时突然发生了 crash。
+
+从前面介绍的 etcd 写原理和上面流程图我们可知，此时 MVCC 写事务持有 boltdb 写锁，仅是将修改提交到了内存中，保证幂等性、防止日志条目重复执行的一致性索引 consistent index 也并未更新。同时，负责 boltdb 事务提交的 goroutine 因无法持有写锁，也并未将事务提交到持久化存储中。
+
+因此，T1 时间点发生 crash 异常后，事务并未成功执行和持久化任意数据到磁盘上。在节点重启时，etcd server 会重放 WAL 中的已提交日志条目，再次执行以上转账事务。因此不会出现 Alice 扣款成功、Bob 到帐失败等严重 Bug，极大简化了业务的编程复杂度。
+
+**T2 时间点**
+
+T2 时间点是在 MVCC 写事务完成转账，server 返回给 client 转账成功后，boltdb 的事务提交 goroutine，批量将事务持久化到磁盘中时发生了 crash。这时 etcd 又是如何保证原子性和持久性的呢?
+
+我们知道一致性索引 consistent index 字段值是和 key-value 数据在一个 boltdb 事务里同时持久化到磁盘中的。若在 boltdb 事务提交过程中发生 crash 了，简单情况是 consistent index 和 key-value 数据都更新失败。那么当节点重启，etcd server 重放 WAL 中已提交日志条目时，同样会再次应用转账事务到状态机中，因此事务的原子性和持久化依然能得到保证。
+
+更复杂的情况是，当 boltdb 提交事务的时候，会不会部分数据提交成功，部分数据提交失败呢？这个问题，将在下一小节通过深入介绍 boltdb 为你解答。
+
+了解完 etcd 事务的原子性和持久性后，那一致性又是怎么一回事呢？事务的一致性难道是指各个节点数据一致性吗？
+
+#### 一致性
+在软件系统中，到处可见一致性（Consistency）的表述，其实在不同场景下，它的含义是不一样的。
+
+首先分布式系统中多副本数据一致性，它是指各个副本之间的数据是否一致，比如 Redis 的主备是异步复制的，那么它的一致性是最终一致性的。
+
+其次是 CAP 原理中的一致性是指可线性化。核心原理是虽然整个系统是由多副本组成，但是通过线性化能力支持，对 client 而言就如一个副本，应用程序无需关心系统有多少个副本。
+
+然后是一致性哈希，它是一种分布式系统中的数据分片算法，具备良好的分散性、平衡性。
+
+最后是事务中的一致性，它是指事务变更前后，数据库必须满足若干恒等条件的状态约束，一致性往往是由数据库和业务程序两方面来保障的。
+
+在 Alice 向 Bob 转账的案例中有哪些恒等状态呢？
+
+很明显，转账系统内的各账号资金总额，在转账前后应该一致，同时各账号资产不能小于 0。
+
+为了更好地理解前面转账事务实现的问题，下面画了幅两个并发转账事务的流程图。
+
+图中有两个并发的转账事务，Mike 向 Bob 转账 100 元，Alice 也向 Bob 转账 100 元，按照我们上面的事务实现，从下图可知转账前系统总资金是 600 元，转账后却只有 500 元了，因此它无法保证转账前后账号系统内的资产一致性，导致了资产凭空消失，破坏了事务的一致性。
+
+![p30](http://cdn.ipso.live/notes/etcd/etcd030.png)
+
+事务一致性被破坏的根本原因是，事务中缺少对 Bob 账号资产是否发生变化的判断，这就导致账号资金被覆盖。
+
+为了确保事务的一致性，一方面，业务程序在转账逻辑里面，需检查转账者资产大于等于转账金额。在事务提交时，通过账号资产的版本号，确保双方账号资产未被其他事务修改。若双方账号资产被其他事务修改，账号资产版本号会检查失败，这时业务可以通过获取最新的资产和版本号，发起新的转账事务流程解决。
+
+另一方面，etcd 会通过 WAL 日志和 consistent index、boltdb 事务特性，去确保事务的原子性，因此不会有部分成功部分失败的操作，导致资金凭空消失、新增。
+
+介绍完事务的原子性和持久化、一致性后，我们再看看 etcd 又是如何提供各种隔离级别的事务，在转账过程中，其他 client 能看到转账的中间状态吗 (如 Alice 扣款成功，Bob 还未增加时)？
+
+#### 隔离性
+
+ACID 中的 I 是指 Isolation，也就是事务的隔离性，它是指事务在执行过程中的可见性。常见的事务隔离级别有以下四种。
+
+首先是未提交读（Read UnCommitted），也就是一个 client 能读取到未提交的事务。比如转账事务过程中，Alice 账号资金扣除后，Bob 账号上资金还未增加，这时如果其他 client 读取到这种中间状态，它会发现系统总金额钱减少了，破坏了事务一致性的约束。
+
+其次是已提交读（Read Committed），指的是只能读取到已经提交的事务数据，但是存在不可重复读的问题。比如事务开始时，你读取了 Alice 和 Bob 资金，这时其他事务修改 Alice 和 Bob 账号上的资金，你在事务中再次读取时会读取到最新资金，导致两次读取结果不一样。
+
+接着是可重复读（Repeated Read），它是指在一个事务中，同一个读操作 get Alice/Bob 在事务的任意时刻都能得到同样的结果，其他修改事务提交后也不会影响你本事务所看到的结果。
+
+最后是串行化（Serializable），它是最高的事务隔离级别，读写相互阻塞，通过牺牲并发能力、串行化来解决事务并发更新过程中的隔离问题。对于串行化我要和你特别补充一点，很多人认为它都是通过读写锁，来实现事务一个个串行提交的，其实这只是在基于锁的并发控制数据库系统实现而已。为了优化性能，在基于 MVCC 机制实现的各个数据库系统中，提供了一个名为“可串行化的快照隔离”级别，相比悲观锁而言，它是一种乐观并发控制，通过快照技术实现的类似串行化的效果，事务提交时能检查是否冲突。
+
+下面重点介绍下未提交读、已提交读、可重复读、串行化快照隔离。
+
+**未提交读**
+
+首先是最低的事务隔离级别，未提交读。我们通过如下一个转账事务时间序列图，来分析下一个 client 能否读取到未提交事务修改的数据，是否存在脏读。
+
+![p31](http://cdn.ipso.live/notes/etcd/etcd031.png)
+
+图中有两个事务，一个是用户查询 Alice 和 Bob 资产的事务，一个是我们执行 Alice 向 Bob 转账的事务。
+
+如图中所示，若在 Alice 向 Bob 转账事务执行过程中，etcd server 收到了 client 查询 Alice 和 Bob 资产的读请求，显然此时我们无法接受 client 能读取到一个未提交的事务，因为这对应用程序而言会产生严重的 BUG。那么 etcd 是如何保证不出现这种场景呢？
+
+我们知道 etcd 基于 boltdb 实现读写操作的，读请求由 boltdb 的读事务处理，你可以理解为快照读。写请求由 boltdb 写事务处理，etcd 定时将一批写操作提交到 boltdb 并清空 buffer。
+
+由于 etcd 是批量提交写事务的，而读事务又是快照读，因此当 MVCC 写事务完成时，它需要更新 buffer，这样下一个读请求到达时，才能从 buffer 中获取到最新数据。
+
+在我们的场景中，转账事务并未结束，执行 put Alice 为 100 的操作不会回写 buffer，因此避免了脏读的可能性。用户此刻从 boltdb 快照读事务中查询到的 Alice 和 Bob 资产都为 200。
+
+从以上分析可知，etcd 并未使用悲观锁来解决脏读的问题，而是通过 MVCC 机制来实现读写不阻塞，并解决脏读的问题。
+
+**已提交读、可重复读**
+
+比未提交读隔离级别更高的是已提交读，它是指在事务中能读取到已提交数据，但是存在不可重复读的问题。已提交读，也就是说你每次读操作，若未增加任何版本号限制，默认都是当前读，etcd 会返回最新已提交的事务结果给你。
+
+如何理解不可重复读呢?
+
+在上面用户查询 Alice 和 Bob 事务的案例中，第一次查出来资产都是 200，第二次是 Alice 为 100，Bob 为 300，通过读已提交模式，你能及时获取到 etcd 最新已提交的事务结果，但是出现了不可重复读，两次读出来的 Alice 和 Bob 资产不一致。
+
+那么如何实现可重复读呢？
+
+你可以通过 MVCC 快照读，或者参考 etcd 的事务框架 STM 实现，它在事务中维护一个读缓存，优先从读缓存中查找，不存在则从 etcd 查询并更新到缓存中，这样事务中后续读请求都可从缓存中查找，确保了可重复读。
+
+最后我们再来重点介绍下什么是串行化快照隔离。
+
+**串行化快照隔离**
+
+串行化快照隔离是最严格的事务隔离级别，它是指在在事务刚开始时，首先获取 etcd 当前的版本号 rev，事务中后续发出的读请求都带上这个版本号 rev，告诉 etcd 你需要获取那个时间点的快照数据，etcd 的 MVCC 机制就能确保事务中能读取到同一时刻的数据。
+
+同时，它还要确保事务提交时，你读写的数据都是最新的，未被其他人修改，也就是要增加冲突检测机制。当事务提交出现冲突的时候依赖 client 重试解决，安全地实现多 key 原子更新。
+
+那么我们应该如何为上面一致性案例中，两个并发转账的事务，增加冲突检测机制呢？
+
+核心就是我们前面介绍 MVCC 的版本号，我通过下面的并发转账事务流程图为你解释它是如何工作的。
+
+![p32](http://cdn.ipso.live/notes/etcd/etcd032.png)
+
+如上图所示，事务 A，Alice 向 Bob 转账 100 元，事务 B，Mike 向 Bob 转账 100 元，两个事务同时发起转账操作。
+
+一开始时，Mike 的版本号 (指 mod_revision) 是 4，Bob 版本号是 3，Alice 版本号是 2，资产各自 200。为了防止并发写事务冲突，etcd 在一个写事务开始时，会独占一个 MVCC 读写锁。
+
+事务 A 会先去 etcd 查询当前 Alice 和 Bob 的资产版本号，用于在事务提交时做冲突检测。在事务 A 查询后，事务 B 获得 MVCC 写锁并完成转账事务，Mike 和 Bob 账号资产分别为 100，300，版本号都为 5。
+
+事务 B 完成后，事务 A 获得写锁，开始执行事务。
+
+为了解决并发事务冲突问题，事务 A 中增加了冲突检测，期望的 Alice 版本号应为 2，Bob 为 3。结果事务 B 的修改导致 Bob 版本号变成了 5，因此此事务会执行失败分支，再次查询 Alice 和 Bob 版本号和资产，发起新的转账事务，成功通过 MVCC 冲突检测规则 mod(“Alice”) = 2 和 mod(“Bob”) = 5 后，更新 Alice 账号资产为 100，Bob 资产为 400，完成转账操作。
+
+通过上面介绍的快照读和 MVCC 冲突检测检测机制，etcd 就可实现串行化快照隔离能力。
+
+#### 转账案例应用
+介绍完 etcd 事务 ACID 特性实现后，你很容易发现事务特性初体验中的案例问题了，它缺少了完整事务的冲突检测机制。
+
+首先你可通过一个事务获取 Alice 和 Bob 账号的上资金和版本号，用以判断 Alice 是否有足够的金额转账给 Bob 和事务提交时做冲突检测。 你可通过如下 etcdctl txn 命令，获取 Alice 和 Bob 账号的资产和最后一次修改时的版本号 (mod_revision):
+```sh
+$ etcdctl txn -i -w=json
+compares:
+
+
+success requests (get, put, del):
+get Alice
+get Bob
+
+
+failure requests (get, put, del):
+
+
+{
+ "kvs":[
+      {
+          "key":"QWxpY2U=",
+          "create_revision":2,
+          "mod_revision":2,
+          "version":1,
+          "value":"MjAw"
+      }
+  ],
+    ......
+  "kvs":[
+      {
+          "key":"Qm9i",
+          "create_revision":3,
+          "mod_revision":3,
+          "version":1,
+          "value":"MzAw"
+      }
+  ],
+}
+```
+
+其次发起资金转账操作，Alice 账号减去 100，Bob 账号增加 100。为了保证转账事务的准确性、一致性，提交事务的时候需检查 Alice 和 Bob 账号最新修改版本号与读取资金时的一致 (compares 操作中增加版本号检测)，以保证其他事务未修改两个账号的资金。
+
+若 compares 操作通过检查，则执行转账操作，否则执行查询 Alice 和 Bob 账号资金操作，命令如下:
+```sh
+$ etcdctl txn -i
+compares:
+mod("Alice") = "2"
+mod("Bob") = "3"
+
+
+success requests (get, put, del):
+put Alice 100
+put Bob 300
+
+
+failure requests (get, put, del):
+get Alice
+get Bob
+
+
+SUCCESS
+
+
+OK
+
+OK
+```
+
+到这里我们就完成了一个安全的转账事务操作，从以上流程中你可以发现，自己从 0 到 1 实现一个完整的事务还是比较繁琐的，幸运的是，etcd 社区基于以上介绍的事务特性，提供了一个简单的事务框架[STM](https://github.com/etcd-io/etcd/blob/main/client/v3/concurrency/stm.go)，构建了各个事务隔离级别类，帮助你进一步简化应用编程复杂度。
+
+#### 小结
+
+最后我们来小结下今天的内容。首先我给你介绍了事务 API 的基本结构，它由 If、Then、Else 语句组成。
+
+其中 If 支持多个比较规则，它是用于事务提交时的冲突检测，比较的对象支持 key 的 mod_revision、create_revision、version、value 值。随后介绍了整个事务执行的基本流程，Apply 模块首先执行 If 的比较规则，为真则执行 Then 语句，否则执行 Else 语句。
+
+接着通过转账案例，四幅转账事务时间序列图，分析了事务的 ACID 特性，剖析了在 etcd 中事务的 ACID 特性的实现。
+
+- 原子性是指一个事务要么全部成功要么全部失败，etcd 基于 WAL 日志、consistent index、boltdb 的事务能力提供支持。
+- 一致性是指事务转账前后的，数据库和应用程序期望的恒等状态应该保持不变，这通过数据库和业务应用程序相互协作完成。
+- 持久性是指事务提交后，数据不丢失，
+- 隔离性是指事务提交过程中的可见性，etcd 不存在脏读，基于 MVCC 机制、boltdb 事务你可以实现可重复读、串行化快照隔离级别的事务，保障并发事务场景中你的数据安全性。
+
+
+---
+
+## # boltdb：如何持久化存储你的key-value数据？
+
+在前面，已经多次提到过 etcd 数据存储在 boltdb。那么 boltdb 是如何组织 key-value 数据的呢？当读写一个 key 时，boltdb 是如何工作的？
+
+现在将通过一个写请求在 boltdb 中执行的简要流程，分析其背后的 boltdb 的磁盘文件布局，帮助了解 page、node、bucket 等核心数据结构的原理与作用，搞懂 boltdb 基于 B+ tree、各类 page 实现查找、更新、事务提交的原理，让你明白 etcd 为什么适合读多写少的场景。
+
+#### boltdb 磁盘布局
+在介绍一个 put 写请求在 boltdb 中执行原理前，先从整体上介绍下平时所看到的 etcd db 文件的磁盘布局，来了解下 db 文件的物理存储结构。
+
+boltdb 文件指的是你 etcd 数据目录下的 member/snap/db 的文件， etcd 的 key-value、lease、meta、member、cluster、auth 等所有数据存储在其中。etcd 启动的时候，会通过 mmap 机制将 db 文件映射到内存，后续可从内存中快速读取文件中的数据。写请求通过 fwrite 和 fdatasync 来写入、持久化数据到磁盘。
+
+![p33](http://cdn.ipso.live/notes/etcd/etcd033.png)
+
+上图是画的 db 文件磁盘布局，从图中的左边部分你可以看到，文件的内容由若干个 page 组成，一般情况下 page size 为 4KB。
+
+page 按照功能可分为元数据页 (meta page)、B+ tree 索引节点页 (branch page)、B+ tree 叶子节点页 (leaf page)、空闲页管理页 (freelist page)、空闲页 (free page)。
+
+文件最开头的两个 page 是固定的 db 元数据 meta page，空闲页管理页记录了 db 中哪些页是空闲、可使用的。索引节点页保存了 B+ tree 的内部节点，如图中的右边部分所示，它们记录了 key 值，叶子节点页记录了 B+ tree 中的 key-value 和 bucket 数据。
+
+boltdb 逻辑上通过 B+ tree 来管理 branch/leaf page， 实现快速查找、写入 key-value 数据。
+
+#### boltdb API
+
+了解完 boltdb 的磁盘布局后，那么如果要在 etcd 中执行一个 put 请求，boltdb 中是如何执行的呢？ boltdb 作为一个库，提供了什么 API 给 client 访问写入数据？
+
+boltdb 提供了非常简单的 API 给上层业务使用，当我们执行一个 put hello 为 world 命令时，boltdb 实际写入的 key 是版本号，value 为 mvccpb.KeyValue 结构体。
+
+这里我们简化下，假设往 key bucket 写入一个 key 为 r94，value 为 world 的字符串，其核心代码如下：
+```go
+func main(){
+  // 打开boltdb文件，获取db对象
+  db,err := bolt.Open("db"， 0600， nil)
+  if err != nil {
+    log.Fatal(err)
+  }
+  defer db.Close()
+  // 参数true表示创建一个写事务，false读事务
+  tx,err := db.Begin(true)
+  if err != nil {
+    return err
+  }
+  defer tx.Rollback()
+  // 使用事务对象创建key bucket
+  b,err := tx.CreatebucketIfNotExists([]byte("key"))
+  if err != nil {
+    return err
+  }
+  // 使用bucket对象更新一个key
+  if err := b.Put([]byte("r94"),[]byte("world")); err != nil {
+    return err
+  }
+  // 提交事务
+  if err := tx.Commit(); err != nil {
+    return err
+  }
+}
+```
+如上所示，通过 boltdb 的 Open API，我们获取到 boltdb 的核心对象 db 实例后，然后通过 db 的 Begin API 开启写事务，获得写事务对象 tx。
+
+通过写事务对象 tx， 你可以创建 bucket。这里我们创建了一个名为 key 的 bucket（如果不存在），并使用 bucket API 往其中更新了一个 key 为 r94，value 为 world 的数据。最后我们使用写事务的 Commit 接口提交整个事务，完成 bucket 创建和 key-value 数据写入。
+
+看起来是不是非常简单，神秘的 boltdb，并未有我们想象的那么难。然而其 API 简单的背后却是 boltdb 的一系列巧妙的设计和实现。
+
+一个 key-value 数据如何知道该存储在 db 在哪个 page？如何快速找到你的 key-value 数据？事务提交的原理又是怎样的呢？
+
+接下来就浅析 boltdb 背后的奥秘。
+
+#### 核心数据结构介绍
+上面介绍 boltdb 的磁盘布局时提到，**boltdb 整个文件由一个个 page 组成。最开头的两个 page 描述 db 元数据信息**，而它正是在 client 调用 boltdb Open API 时被填充的。那么描述磁盘页面的 page 数据结构是怎样的呢？元数据页又含有哪些核心数据结构？
+
+boltdb 本身自带了一个工具 bbolt，它可以按页打印出 db 文件的十六进制的内容，下面我们就使用此工具来揭开 db 文件的神秘面纱。
+
+下图左边的十六进制是执行如下bbolt dump命令，所打印的 boltdb 第 0 页的数据，图的右边是对应的 page 磁盘页结构和 meta page 的数据结构。
+```sh
+$ ./bbolt dump ./infra1.etcd/member/snap/db 0
+```
+
+![p34](http://cdn.ipso.live/notes/etcd/etcd034.png)
+
+一看上图中的十六进制数据，你可能很懵，没关系，在你了解 page 磁盘页结构、meta page 数据结构后，你就能读懂其含义了。
+
+#### page 磁盘页结构
+我们先了解下 page 磁盘页结构，如上图所示，它由页 ID(id)、页类型 (flags)、数量 (count)、溢出页数量 (overflow)、页面数据起始位置 (ptr) 字段组成。
+
+页类型目前有如下四种：0x01 表示 branch page，0x02 表示 leaf page，0x04 表示 meta page，0x10 表示 freelist page。
+
+数量字段仅在页类型为 leaf 和 branch 时生效，溢出页数量是指当前页面数据存放不下，需要向后再申请 overflow 个连续页面使用，页面数据起始位置指向 page 的载体数据，比如 meta page、branch/leaf 等 page 的内容。
+
+#### meta page 数据结构
+meta page 数据结构第 0、1 页我们知道它是固定存储 db 元数据的页 (meta page)，那么 meta page 它为了管理整个 boltdb 含有哪些信息呢？
+
+如上图中的 meta page 数据结构所示，你可以看到它由 boltdb 的文件标识 (magic)、版本号 (version)、页大小 (pagesize)、boltdb 的根 bucket 信息 (root bucket)、freelist 页面 ID(freelist)、总的页面数量 (pgid)、上一次写事务 ID(txid)、校验码 (checksum) 组成。
+
+#### bucket 数据结构
+如下命令所示，你可以使用 bbolt buckets 命令，输出一个 db 文件的 bucket 列表。执行完此命令后，我们可以看到之前介绍过的 auth/lease/meta 等熟悉的 bucket，它们都是 etcd 默认创建的。那么 boltdb 是如何存储、管理 bucket 的呢？
+```sh
+$ ./bbolt buckets  ./infra1.etcd/member/snap/db
+alarm
+auth
+authRoles
+authUsers
+cluster
+key
+lease
+members
+members_removed
+meta
+
+```
+在上面我们提到过 meta page 中的，有一个名为 root、类型 bucket 的重要数据结构，如下所示，bucket 由 root 和 sequence 两个字段组成，root 表示该 bucket 根节点的 page id。注意 meta page 中的 bucket.root 字段，存储的是 db 的 root bucket 页面信息，你所看到的 key/lease/auth 等 bucket 都是 root bucket 的子 bucket。
+```go
+type bucket struct {
+   root     pgid   // page id of the bucket's root-level page
+   sequence uint64 // monotonically incrementing, used by NextSequence()
+}
+```
+
+我们可以通过如下 bbolt pages 命令看看各个 page 类型和元素数量，从下图结果可知，4 号页面为 leaf page。
+```sh
+$ ./bbolt pages  ./infra1.etcd/member/snap/db
+ID       TYPE       ITEMS  OVRFLW
+======== ========== ====== ======
+0        meta       0
+1        meta       0
+2        free
+3        freelist   2
+4        leaf       10
+5        free
+```
+通过上面的分析可知，当 bucket 比较少时，我们子 bucket 数据可直接从 meta page 里指向的 leaf page 中找到。
+
+#### leaf page
+leaf page 的磁盘布局，前半部分是 leafPageElement 数组，后半部分是 key-value 数组。
+
+leafPageElement 包含 leaf page 的类型 flags， 通过它可以区分存储的是 bucket 名称还是 key-value 数据。
+
+当 flag 为 bucketLeafFlag(0x01) 时，表示存储的是 bucket 数据，否则存储的是 key-value 数据，leafPageElement 它还含有 key-value 的读取偏移量，key-value 大小，根据偏移量和 key-value 大小，我们就可以方便地从 leaf page 中解析出所有 key-value 对。
+
+当存储的是 bucket 数据的时候，key 是 bucket 名称，value 则是 bucket 结构信息。bucket 结构信息含有 root page 信息，通过 root page（基于 B+ tree 查找算法），你可以快速找到你存储在这个 bucket 下面的 key-value 数据所在页面。
+
+从上面分析你可以看到，每个子 bucket 至少需要一个 page 来存储其下面的 key-value 数据，如果子 bucket 数据量很少，就会造成磁盘空间的浪费。实际上 boltdb 实现了 inline bucket，在满足一些条件限制的情况下，可以将小的子 bucket 内嵌在它的父亲叶子节点上，友好的支持了大量小 bucket。
+
+为了方便快速理解核心原理，这里讨论的 bucket 是假设都是非 inline bucket。
+
+那么 boltdb 是如何管理大量 bucket、key-value 的呢？
+
+#### branch page
+boltdb 使用了 B+ tree 来高效管理所有子 bucket 和 key-value 数据，因此它可以支持大量的 bucket 和 key-value，只不过 B+ tree 的根节点不再直接指向 leaf page，而是 branch page 索引节点页。branch page flags 为 0x01。它的磁盘布局，前半部分是 branchPageElement 数组，后半部分是 key 数组。
+
+branchPageElement 包含 key 的读取偏移量、key 大小、子节点的 page id。根据偏移量和 key 大小，我们就可以方便地从 branch page 中解析出所有 key，然后二分搜索匹配 key，获取其子节点 page id，递归搜索，直至从 bucketLeafFlag 类型的 leaf page 中找到目的 bucket name。
+
+注意，boltdb 在内存中使用了一个名为 node 的数据结构，来保存 page 反序列化的结果。下面我给出了一个 boltdb 读取 page 到 node 的代码片段，你可以直观感受下。
+```go
+func (n *node) read(p *page) {
+   n.pgid = p.id
+   n.isLeaf = ((p.flags & leafPageFlag) != 0)
+   n.inodes = make(inodes, int(p.count))
+
+
+   for i := 0; i < int(p.count); i++ {
+      inode := &n.inodes[i]
+      if n.isLeaf {
+         elem := p.leafPageElement(uint16(i))
+         inode.flags = elem.flags
+         inode.key = elem.key()
+         inode.value = elem.value()
+      } else {
+         elem := p.branchPageElement(uint16(i))
+         inode.pgid = elem.pgid
+         inode.key = elem.key()
+      }
+   }
+}
+```
+从上面分析过程中你会发现，boltdb 存储 bucket 和 key-value 原理是类似的，将 page 划分成 branch page、leaf page，通过 B+ tree 来管理实现。boltdb 为了区分 leaf page 存储的数据类型是 bucket 还是 key-value，增加了标识字段（leafPageElement.flags），因此 key-value 的数据存储过程就不再重复分析了。
+
+#### freelist
+介绍完 bucket、key-value 存储原理后，我们再看 meta page 中的另外一个核心字段 freelist，它的作用是什么呢？
+
+我们知道 boltdb 将 db 划分成若干个 page，那么它是如何知道哪些 page 在使用中，哪些 page 未使用呢？
+
+答案是 boltdb 通过 meta page 中的 freelist 来管理页面的分配，freelist page 中记录了哪些页是空闲的。当你在 boltdb 中删除大量数据的时候，其对应的 page 就会被释放，页 ID 存储到 freelist 所指向的空闲页中。当你写入数据的时候，就可直接从空闲页中申请页面使用。
+
+可以通过 bbolt page 命令查看 page 内容，如下所示，它记录了 2 和 5 为空闲页
+```sh
+$ ./bbolt page  ./infra1.etcd/member/snap/db 3
+page ID:    3
+page Type:  freelist
+Total Size: 4096 bytes
+Item Count: 2
+Overflow: 0
+
+2
+5
+```
+
+freelist page 存储结构，pageflags 为 0x10，表示 freelist 类型的页，ptr 指向空闲页 id 数组。注意在 boltdb 中支持通过多种数据结构（数组和 hashmap）来管理 free page。
+
+#### Open 原理
+了解完核心数据结构后，我们就很容易搞懂 boltdb Open API 的原理了。
+
+首先它会打开 db 文件并对其增加文件锁，目的是防止其他进程也以读写模式打开它后，操作 meta 和 free page，导致 db 文件损坏。
+
+其次 boltdb 通过 mmap 机制将 db 文件映射到内存中，并读取两个 meta page 到 db 对象实例中，然后校验 meta page 的 magic、version、checksum 是否有效，若两个 meta page 都无效，那么 db 文件就出现了严重损坏，导致异常退出。
+
+#### Put 原理
+那么成功获取 db 对象实例后，通过 bucket API 创建一个 bucket、发起一个 Put 请求更新数据时，boltdb 是如何工作的呢？
+
+根据我们上面介绍的 bucket 的核心原理，它首先是根据 meta page 中记录 root bucket 的 root page，按照 B+ tree 的查找算法，从 root page 递归搜索到对应的叶子节点 page 面，返回 key 名称、leaf 类型。
+
+如果 leaf 类型为 bucketLeafFlag，且 key 相等，那么说明已经创建过，不允许 bucket 重复创建，结束请求。否则往 B+ tree 中添加一个 flag 为 bucketLeafFlag 的 key，key 名称为 bucket name，value 为 bucket 的结构。
+
+创建完 bucket 后，你就可以通过 bucket 的 Put API 发起一个 Put 请求更新数据。它的核心原理跟 bucket 类似，根据子 bucket 的 root page，从 root page 递归搜索此 key 到 leaf page，如果没有找到，则在返回的位置处插入新 key 和 value。
+
+在核心数据结构介绍中，提到 boltdb 在内存中通过 node 数据结构来存储 page 磁盘页内容，它记录了 key-value 数据、page id、parent 及 children 的 node、B+ tree 是否需要进行重平衡和分裂操作等信息。
+
+因此，当我们执行完一个 put 请求时，它只是将值更新到 boltdb 的内存 node 数据结构里，并未持久化到磁盘中。
+
+#### 事务提交原理
+那么 boltdb 何时将数据持久化到 db 文件中呢？
+
+当你的代码执行 tx.Commit API 时，它才会将我们上面保存到 node 内存数据结构中的数据，持久化到 boltdb 中。接下来我就分别和你简要分析下各个核心步骤。
+
+首先从上面 put 案例中我们可以看到，插入了一个新的元素在 B+ tree 的叶子节点，它可能已不满足 B+ tree 的特性，因此事务提交时，第一步首先要调整 B+ tree，进行重平衡、分裂操作，使其满足 B+ tree 树的特性。上面案例里插入一个 key r94 后，经过重平衡、分裂操作后的 B+ tree 如下图所示。
+
+在重平衡、分裂过程中可能会申请、释放 free page，freelist 所管理的 free page 也发生了变化。因此事务提交的第二步，就是持久化 freelist。
+
+注意，在 etcd v3.4.9 中，为了优化写性能等，freelist 持久化功能是关闭的。etcd 启动获取 boltdb db 对象的时候，boltdb 会遍历所有 page，构建空闲页列表。
+
+事务提交的第三步就是将 client 更新操作产生的 dirty page 通过 fdatasync 系统调用，持久化存储到磁盘中。
+
+最后，在执行写事务过程中，meta page 的 txid、freelist 等字段会发生变化，因此事务的最后一步就是持久化 meta page。
+
+通过以上四大步骤，我们就完成了事务提交的工作，成功将数据持久化到了磁盘文件中，安全地完成了一个 put 操作。
+
+#### 小结
+
+最后来小结下今天的内容。首先通过一幅 boltdb 磁盘布局图和 bbolt 工具，为你解密了 db 文件的本质。db 文件由 meta page、freelist page、branch page、leaf page、free page 组成。随后结合 bbolt 工具，深入介绍了 meta page、branch page、leaf page、freelist page 的数据结构，帮助了解 key、value 数据是如何存储到文件中的。
+
+然后通过分析一个 put 请求在 boltdb 中如何执行的。从 Open API 获取 db 对象说起，介绍了其通过 mmap 将 db 文件映射到内存，构建 meta page，校验 meta page 的有效性，再到创建 bucket，通过 bucket API 往 boltdb 添加 key-value 数据。
+
+添加 bucket 和 key-value 操作本质，是从 B+ tree 管理的 page 中找到插入的页和位置，并将数据更新到 page 的内存 node 数据结构中。
+
+真正持久化数据到磁盘是通过事务提交执行的。它首先需要通过一系列重平衡、分裂操作，确保 boltdb 维护的 B+ tree 满足相关特性，其次需要持久化 freelist page，并将用户更新操作产生的 dirty page 数据持久化到磁盘中，最后则是持久化 meta page。
+
 
 
 
